@@ -17,7 +17,7 @@ Gem::Specification.new do |spec|
   }
 
   spec.files = Dir.chdir(__dir__) do
-    Dir["{lib,db}/**/*", "README.md", "LICENSE", "CHANGELOG.md"].reject { |f| File.directory?(f) }
+    Dir["{app,config,lib,db}/**/*", "README.md", "LICENSE", "CHANGELOG.md"].reject { |f| File.directory?(f) }
   end
 
   spec.bindir = "bin"

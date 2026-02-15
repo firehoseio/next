@@ -4,36 +4,48 @@ Real-time streaming for Rails with WebSocket and SSE transports, database-backed
 
 Built on a dedicated PostgreSQL LISTEN/NOTIFY connection — no ActionCable, no polling, no connection pool pressure.
 
-## Features
-
-- **Dual transports**: WebSocket and Server-Sent Events (SSE)
-- **Database persistence**: Messages stored in PostgreSQL for replay on reconnect
-- **Automatic replay**: Missed events delivered via `Last-Event-ID` (SSE) or `last_event_id` (WebSocket)
-- **Dedicated PG connection**: LISTEN/NOTIFY outside the ActiveRecord pool, PgBouncer-safe with direct connection
-- **Inline delivery**: Small payloads sent inline via NOTIFY (no DB round-trip), large payloads fall back to DB fetch
-- **Ruby queue**: `Firehose::Queue` for server-side push/pop over PG LISTEN/NOTIFY
-- **Auto-cleanup**: Configurable threshold keeps the last N messages per stream
-- **Falcon-compatible**: Built for async Ruby with async-websocket
-
-## Installation
+## Quick Start
 
 Add to your Gemfile:
 
 ```ruby
-gem "firehose", path: "gems/firehose"
+gem "firehose"
 ```
 
-Run the migration:
+Install:
 
 ```bash
-bin/rails db:migrate
+bundle install
+bin/rails generate firehose:install
 ```
 
-The engine auto-discovers its migrations — no generator needed.
+This creates a `FirehoseController`, adds routes, wires up the JavaScript client, and runs migrations.
 
-## Usage
+Broadcast from anywhere in your app:
 
-### Broadcasting
+```ruby
+Firehose.broadcast("dashboard", "refresh")
+```
+
+Subscribe in your views:
+
+```html
+<firehose-stream-source streams="dashboard"></firehose-stream-source>
+```
+
+The page will automatically refresh via Turbo when an event arrives.
+
+## Features
+
+- **Dual transports**: WebSocket and Server-Sent Events (SSE)
+- **Database persistence**: Messages stored in PostgreSQL for replay on reconnect
+- **Automatic replay**: Missed events delivered via `last_event_id` (WebSocket) or `Last-Event-ID` (SSE)
+- **Dedicated PG connection**: LISTEN/NOTIFY outside the ActiveRecord pool, PgBouncer-safe with direct connection
+- **Inline delivery**: Small payloads sent inline via NOTIFY (no DB round-trip), large payloads fall back to DB fetch
+- **Auto-cleanup**: Configurable threshold keeps the last N messages per stream
+- **Falcon-compatible**: Built for async Ruby with async-websocket
+
+## Broadcasting
 
 ```ruby
 Firehose.broadcast("dashboard", "refresh")
@@ -49,7 +61,9 @@ class Comment < ApplicationRecord
 end
 ```
 
-### Controller Setup
+## Controller
+
+The install generator creates `app/controllers/firehose_controller.rb`:
 
 ```ruby
 class FirehoseController < ApplicationController
@@ -61,7 +75,7 @@ class FirehoseController < ApplicationController
 end
 ```
 
-With authentication and stream authorization:
+Add authentication and stream authorization:
 
 ```ruby
 class FirehoseController < ApplicationController
@@ -80,23 +94,32 @@ class FirehoseController < ApplicationController
 end
 ```
 
-### Routes
+## Routes
+
+The install generator adds these routes:
 
 ```ruby
-# config/routes.rb
 match "firehose", to: "firehose#websocket", via: [:get, :connect]
 get "firehose/sse", to: "firehose#sse"
 ```
 
-### JavaScript Client
+## JavaScript Client
+
+The install generator adds `import "firehose"` to your `application.js`. The importmap pin is set up automatically by the engine.
+
+### Declarative (Custom Element)
+
+```html
+<firehose-stream-source path="/firehose" streams="dashboard,user:42"></firehose-stream-source>
+```
+
+When the element connects, it opens a WebSocket and subscribes to the listed streams. When it disconnects (page navigation, element removal), it unsubscribes. Reconnection with exponential backoff is automatic.
+
+Multiple elements with the same `path` share a single WebSocket connection.
+
+### Programmatic
 
 ```javascript
-import "firehose"
-
-// Declarative via custom element
-<firehose-stream-source path="/firehose" streams="dashboard,user:42"></firehose-stream-source>
-
-// Programmatic
 Firehose.subscribe("/firehose", ["dashboard", "user:42"])
 Firehose.unsubscribe("/firehose", ["dashboard"])
 
@@ -106,7 +129,11 @@ document.addEventListener("firehose:message", (e) => {
 })
 ```
 
-### Phlex Helper
+### Turbo Integration
+
+When an event has `data: "refresh"`, the client automatically triggers a Turbo page refresh. No additional setup needed — just broadcast `"refresh"` as your data payload.
+
+## Phlex Helper
 
 ```ruby
 class Components::Base < Phlex::HTML
@@ -118,23 +145,6 @@ end
 firehose_stream_from @report
 firehose_stream_from "dashboard", "user:#{current_user.id}"
 firehose_stream_from @model, path: "/admin/firehose"
-```
-
-### Ruby Queue
-
-For server-side push/pop — ephemeral signaling over PG LISTEN/NOTIFY without database persistence:
-
-```ruby
-queue = Firehose.server.queue("my-channel")
-
-# Producer
-queue.push("hello")
-
-# Consumer (blocks until a message arrives)
-message = queue.pop
-message = queue.pop(timeout: 5) # raises Firehose::Queue::TimeoutError
-
-queue.close
 ```
 
 ## Configuration

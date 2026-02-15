@@ -1,5 +1,15 @@
 module Firehose
   class Engine < ::Rails::Engine
+    initializer "firehose.assets" do |app|
+      if app.config.respond_to?(:assets)
+        app.config.assets.paths << root.join("app/assets/javascripts")
+      end
+
+      if defined?(Importmap)
+        app.config.importmap.paths << root.join("config/importmap.rb")
+      end
+    end
+
     initializer "firehose.migrations" do |app|
       app.config.paths["db/migrate"].concat(config.paths["db/migrate"].expanded)
     end
