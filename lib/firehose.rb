@@ -24,7 +24,8 @@ module Firehose
 end
 
 require_relative "firehose/engine"
-require_relative "firehose/event"
+require_relative "firehose/channel"
+require_relative "firehose/message"
 require_relative "firehose/broadcaster"
 require_relative "firehose/cleanup_job"
 require_relative "firehose/streamable"

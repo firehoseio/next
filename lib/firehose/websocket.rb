@@ -120,11 +120,13 @@ module Firehose
       end
 
       def replay_events(streams, since_id)
-        Event
-          .where(stream: streams)
+        channels = Channel.where(name: streams)
+        Message
+          .where(channel_id: channels.select(:id))
           .where("id > ?", since_id)
+          .includes(:channel)
           .order(:id)
-          .find_each { |event| send_event(id: event.id, stream: event.stream, data: event.data) }
+          .find_each { |msg| send_event(id: msg.id, channel_id: msg.channel_id, sequence: msg.sequence, stream: msg.channel.name, data: msg.data) }
       end
 
       def send_event(event)

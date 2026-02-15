@@ -1,17 +1,21 @@
 module Firehose
   class CleanupJob < ActiveJob::Base
-    # Keeps the last N events per stream (configurable via Firehose.cleanup_threshold)
     def perform(stream)
-      cutoff_id = Event
-        .where(stream:)
-        .order(id: :desc)
+      channel = Channel.find_by(name: stream)
+      return unless channel
+
+      cutoff_id = channel.messages
+        .order(sequence: :desc)
         .offset(Firehose.cleanup_threshold)
         .limit(1)
         .pick(:id)
 
       return unless cutoff_id
 
-      Event.where(stream:).where("id <= ?", cutoff_id).delete_all
+      channel.messages.where("id <= ?", cutoff_id).delete_all
+      channel.update_columns(messages_count: channel.messages.count)
+
+      channel.destroy if channel.messages_count == 0
     end
   end
 end

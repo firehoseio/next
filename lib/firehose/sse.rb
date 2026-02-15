@@ -91,11 +91,13 @@ module Firehose
       def replay_events
         return unless last_event_id > 0
 
-        Event
-          .where(stream: @streams)
+        channels = Channel.where(name: @streams)
+        Message
+          .where(channel_id: channels.select(:id))
           .where("id > ?", last_event_id)
+          .includes(:channel)
           .order(:id)
-          .find_each { |event| write_event(id: event.id, stream: event.stream, data: event.data) }
+          .find_each { |msg| write_event(id: msg.id, channel_id: msg.channel_id, sequence: msg.sequence, stream: msg.channel.name, data: msg.data) }
       end
 
       def subscribe_to_streams
@@ -131,7 +133,8 @@ module Firehose
         body = @response.body
         body.write("id: #{event[:id]}\n")
         body.write("event: #{event[:stream]}\n")
-        body.write("data: #{event[:data]}\n\n")
+        data = { data: event[:data], channel_id: event[:channel_id], sequence: event[:sequence] }.to_json
+        body.write("data: #{data}\n\n")
       end
 
       def cleanup

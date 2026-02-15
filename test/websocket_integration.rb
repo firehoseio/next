@@ -50,8 +50,8 @@ describe Firehose::Stream do
 
   it "handles subscribe command and replays events" do
     # Create some events first
-    event1 = Firehose.broadcast("ws-test", "event-1")
-    event2 = Firehose.broadcast("ws-test", "event-2")
+    msg1 = Firehose.broadcast("ws-test", "event-1")
+    msg2 = Firehose.broadcast("ws-test", "event-2")
 
     with_server do
       Async::WebSocket::Client.connect(endpoint) do |connection|
@@ -59,7 +59,7 @@ describe Firehose::Stream do
         connection.write(Protocol::WebSocket::TextMessage.generate({
           command: "subscribe",
           streams: ["ws-test"],
-          last_event_id: event1.id - 1
+          last_event_id: msg1.id - 1
         }))
         connection.flush
 
@@ -73,6 +73,8 @@ describe Firehose::Stream do
         expect(received.length).to be == 2
         expect(received[0]["data"]).to be == "event-1"
         expect(received[1]["data"]).to be == "event-2"
+        expect(received[0]["channel_id"]).to be == msg1.channel_id
+        expect(received[0]["sequence"]).to be == msg1.sequence
       end
     end
   end
@@ -107,7 +109,7 @@ describe Firehose::Stream do
         connection.write(Protocol::WebSocket::TextMessage.generate({
           command: "subscribe",
           streams: ["live-test"],
-          last_event_id: Firehose::Event.maximum(:id) || 0
+          last_event_id: Firehose::Message.maximum(:id) || 0
         }))
         connection.flush
 
@@ -123,6 +125,8 @@ describe Firehose::Stream do
 
         expect(data["stream"]).to be == "live-test"
         expect(data["data"]).to be == "live-event"
+        expect(data["channel_id"]).to be_a(Integer)
+        expect(data["sequence"]).to be_a(Integer)
       end
     end
   end

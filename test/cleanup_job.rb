@@ -9,61 +9,70 @@ describe Firehose::CleanupJob do
     Firehose.cleanup_threshold = @original_threshold
   end
 
-  it "keeps exactly threshold number of events" do
+  def create_messages(stream, count)
+    channel = Firehose::Channel.find_or_create_by!(name: stream)
+    count.times do |i|
+      seq = channel.sequence + 1
+      channel.update_columns(sequence: seq)
+      channel.messages.create!(sequence: seq, data: "event-#{i}")
+    end
+    channel.update_columns(messages_count: channel.messages.count)
+    channel
+  end
+
+  it "keeps exactly threshold number of messages" do
     Firehose.cleanup_threshold = 5
     stream = "cleanup-exact-#{SecureRandom.hex(4)}"
 
-    # Create 10 events
-    10.times { |i| Firehose::Event.create!(stream:, data: "event-#{i}") }
-    expect(Firehose::Event.where(stream:).count).to be == 10
+    channel = create_messages(stream, 10)
+    expect(channel.messages.count).to be == 10
 
     Firehose::CleanupJob.perform_now(stream)
 
-    expect(Firehose::Event.where(stream:).count).to be == 5
+    expect(channel.messages.count).to be == 5
   end
 
-  it "keeps the newest events" do
+  it "keeps the newest messages" do
     Firehose.cleanup_threshold = 3
     stream = "cleanup-newest-#{SecureRandom.hex(4)}"
 
-    events = 6.times.map { |i| Firehose::Event.create!(stream:, data: "event-#{i}") }
+    channel = create_messages(stream, 6)
 
     Firehose::CleanupJob.perform_now(stream)
 
-    remaining = Firehose::Event.where(stream:).order(:id).pluck(:data)
+    remaining = channel.messages.order(:sequence).pluck(:data)
     expect(remaining).to be == ["event-3", "event-4", "event-5"]
   end
 
-  it "does nothing when events equal threshold" do
+  it "does nothing when messages equal threshold" do
     Firehose.cleanup_threshold = 5
     stream = "cleanup-equal-#{SecureRandom.hex(4)}"
 
-    5.times { |i| Firehose::Event.create!(stream:, data: "event-#{i}") }
+    channel = create_messages(stream, 5)
 
     Firehose::CleanupJob.perform_now(stream)
 
-    expect(Firehose::Event.where(stream:).count).to be == 5
+    expect(channel.messages.count).to be == 5
   end
 
-  it "does nothing when events below threshold" do
+  it "does nothing when messages below threshold" do
     Firehose.cleanup_threshold = 10
     stream = "cleanup-below-#{SecureRandom.hex(4)}"
 
-    3.times { |i| Firehose::Event.create!(stream:, data: "event-#{i}") }
+    channel = create_messages(stream, 3)
 
     Firehose::CleanupJob.perform_now(stream)
 
-    expect(Firehose::Event.where(stream:).count).to be == 3
+    expect(channel.messages.count).to be == 3
   end
 
   it "does nothing for empty stream" do
     Firehose.cleanup_threshold = 5
     stream = "cleanup-empty-#{SecureRandom.hex(4)}"
 
-    # No error should be raised
     Firehose::CleanupJob.perform_now(stream)
 
-    expect(Firehose::Event.where(stream:).count).to be == 0
+    expect(Firehose::Channel.find_by(name: stream)).to be_nil
   end
 
   it "only affects the specified stream" do
@@ -71,24 +80,24 @@ describe Firehose::CleanupJob do
     stream_a = "cleanup-a-#{SecureRandom.hex(4)}"
     stream_b = "cleanup-b-#{SecureRandom.hex(4)}"
 
-    5.times { |i| Firehose::Event.create!(stream: stream_a, data: "a-#{i}") }
-    5.times { |i| Firehose::Event.create!(stream: stream_b, data: "b-#{i}") }
+    channel_a = create_messages(stream_a, 5)
+    channel_b = create_messages(stream_b, 5)
 
     Firehose::CleanupJob.perform_now(stream_a)
 
-    expect(Firehose::Event.where(stream: stream_a).count).to be == 3
-    expect(Firehose::Event.where(stream: stream_b).count).to be == 5
+    expect(channel_a.messages.count).to be == 3
+    expect(channel_b.messages.count).to be == 5
   end
 
   it "handles threshold of 1" do
     Firehose.cleanup_threshold = 1
     stream = "cleanup-one-#{SecureRandom.hex(4)}"
 
-    5.times { |i| Firehose::Event.create!(stream:, data: "event-#{i}") }
+    channel = create_messages(stream, 5)
 
     Firehose::CleanupJob.perform_now(stream)
 
-    remaining = Firehose::Event.where(stream:)
+    remaining = channel.messages
     expect(remaining.count).to be == 1
     expect(remaining.first.data).to be == "event-4"
   end
@@ -97,39 +106,54 @@ describe Firehose::CleanupJob do
     Firehose.cleanup_threshold = 1000
     stream = "cleanup-large-#{SecureRandom.hex(4)}"
 
-    10.times { |i| Firehose::Event.create!(stream:, data: "event-#{i}") }
+    channel = create_messages(stream, 10)
 
     Firehose::CleanupJob.perform_now(stream)
 
-    # All events should remain
-    expect(Firehose::Event.where(stream:).count).to be == 10
+    expect(channel.messages.count).to be == 10
   end
 
   it "can be run multiple times safely" do
     Firehose.cleanup_threshold = 5
     stream = "cleanup-idempotent-#{SecureRandom.hex(4)}"
 
-    10.times { |i| Firehose::Event.create!(stream:, data: "event-#{i}") }
+    channel = create_messages(stream, 10)
 
     3.times { Firehose::CleanupJob.perform_now(stream) }
 
-    expect(Firehose::Event.where(stream:).count).to be == 5
+    expect(channel.messages.count).to be == 5
+  end
+
+  it "deletes channel when all messages are cleaned up" do
+    Firehose.cleanup_threshold = 0
+    stream = "cleanup-delete-#{SecureRandom.hex(4)}"
+
+    channel = create_messages(stream, 3)
+    expect(Firehose::Channel.find_by(name: stream)).not.to be_nil
+
+    Firehose::CleanupJob.perform_now(stream)
+
+    expect(Firehose::Channel.find_by(name: stream)).to be_nil
   end
 
   with "concurrent cleanup" do
-    it "handles events added during cleanup" do
+    it "handles messages added during cleanup" do
       Firehose.cleanup_threshold = 5
       stream = "cleanup-concurrent-#{SecureRandom.hex(4)}"
 
-      10.times { |i| Firehose::Event.create!(stream:, data: "event-#{i}") }
+      channel = create_messages(stream, 10)
 
       Firehose::CleanupJob.perform_now(stream)
 
-      # Add more events after cleanup
-      3.times { |i| Firehose::Event.create!(stream:, data: "new-#{i}") }
+      # Add more messages after cleanup
+      3.times do |i|
+        seq = channel.reload.sequence + 1
+        channel.update_columns(sequence: seq)
+        channel.messages.create!(sequence: seq, data: "new-#{i}")
+      end
+      channel.update_columns(messages_count: channel.messages.count)
 
-      # Should have 5 (kept) + 3 (new) = 8 events
-      expect(Firehose::Event.where(stream:).count).to be == 8
+      expect(channel.messages.count).to be == 8
     end
   end
 end

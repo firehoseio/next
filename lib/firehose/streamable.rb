@@ -25,8 +25,9 @@ module Firehose
     private
 
     def firehose_replay_events(streams, since_id)
-      Event
-        .where(stream: streams)
+      channel_ids = Channel.where(name: streams).pluck(:id)
+      Message
+        .where(channel_id: channel_ids)
         .where("id > ?", since_id)
         .order(:id)
     end

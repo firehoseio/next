@@ -5,21 +5,23 @@ module Firehose
         stream = stream.to_s
         data = data.to_s
 
-        # Persist for replay via Last-Event-ID
-        event = Event.create!(stream:, data:)
+        channel = Channel.find_or_create_by!(name: stream)
 
-        # Instant delivery via PostgreSQL LISTEN/NOTIFY
+        message = channel.with_lock do
+          channel.increment!(:sequence)
+          channel.messages.create!(sequence: channel.sequence, data:)
+        end
+
         ActionCable.server.pubsub.broadcast(
           channel_name(stream),
-          { id: event.id, stream:, data: }.to_json
+          { id: message.id, channel_id: channel.id, sequence: message.sequence, stream:, data: }.to_json
         )
 
-        # Schedule cleanup if threshold exceeded
-        if Event.where(stream:).count > Firehose.cleanup_threshold
+        if channel.messages.count > Firehose.cleanup_threshold
           CleanupJob.perform_later(stream)
         end
 
-        event
+        message
       end
 
       def channel_name(stream)
