@@ -32,7 +32,7 @@ module Firehose
         say ""
         say "Firehose installed!", :green
         say ""
-        say "  Broadcast:   Firehose.broadcast(\"my-stream\", \"refresh\")"
+        say "  Broadcast:   Firehose.channel(\"my-stream\").publish(\"refresh\")"
         say "  Subscribe:   <firehose-stream-source streams=\"my-stream\"></firehose-stream-source>"
         say ""
         say "  Edit app/controllers/firehose_controller.rb to add authentication."
