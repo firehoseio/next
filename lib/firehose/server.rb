@@ -33,6 +33,8 @@ module Firehose
       @commands = ::Queue.new
       @wakeup_read, @wakeup_write = IO.pipe
       @running = false
+      @started = false
+      @start_mutex = Mutex.new
       @reconnects = 0
     end
 
@@ -50,15 +52,15 @@ module Firehose
     end
 
     def start
+      # Mark as ready but don't connect yet — connection is lazy.
       @running = true
-      @thread = Thread.new { run }
-      Firehose.logger.info { "[Firehose] Server started pid=#{Process.pid}" }
       self
     end
 
     def shutdown
       return unless @running
       @running = false
+      return unless @started
       Firehose.logger.info { "[Firehose] Server shutting down" }
       enqueue([:shutdown])
       @thread&.join(5)
@@ -68,6 +70,7 @@ module Firehose
     end
 
     def broadcast(stream, data)
+      ensure_started!
       stream = stream.to_s
       data = data.to_s
 
@@ -103,6 +106,7 @@ module Firehose
     end
 
     def subscribe(channel, callback)
+      ensure_started!
       if @registry.add(channel, callback)
         Firehose.logger.debug { "[Firehose] LISTEN #{channel}" }
         enqueue([:listen, channel])
@@ -125,6 +129,17 @@ module Firehose
     end
 
     private
+
+    def ensure_started!
+      return if @started
+
+      @start_mutex.synchronize do
+        return if @started
+        @thread = Thread.new { run }
+        @started = true
+        Firehose.logger.info { "[Firehose] Server started pid=#{Process.pid}" }
+      end
+    end
 
     def enqueue(command)
       depth = @commands.size
