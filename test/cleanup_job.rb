@@ -2,11 +2,11 @@ require_relative "../../../config/environment"
 
 describe Firehose::CleanupJob do
   before do
-    @original_threshold = Firehose.cleanup_threshold
+    @original_threshold = Firehose.server.cleanup_threshold
   end
 
   after do
-    Firehose.cleanup_threshold = @original_threshold
+    Firehose.server.cleanup_threshold = @original_threshold
   end
 
   def create_messages(stream, count)
@@ -21,7 +21,7 @@ describe Firehose::CleanupJob do
   end
 
   it "keeps exactly threshold number of messages" do
-    Firehose.cleanup_threshold = 5
+    Firehose.server.cleanup_threshold = 5
     stream = "cleanup-exact-#{SecureRandom.hex(4)}"
 
     channel = create_messages(stream, 10)
@@ -33,7 +33,7 @@ describe Firehose::CleanupJob do
   end
 
   it "keeps the newest messages" do
-    Firehose.cleanup_threshold = 3
+    Firehose.server.cleanup_threshold = 3
     stream = "cleanup-newest-#{SecureRandom.hex(4)}"
 
     channel = create_messages(stream, 6)
@@ -45,7 +45,7 @@ describe Firehose::CleanupJob do
   end
 
   it "does nothing when messages equal threshold" do
-    Firehose.cleanup_threshold = 5
+    Firehose.server.cleanup_threshold = 5
     stream = "cleanup-equal-#{SecureRandom.hex(4)}"
 
     channel = create_messages(stream, 5)
@@ -56,7 +56,7 @@ describe Firehose::CleanupJob do
   end
 
   it "does nothing when messages below threshold" do
-    Firehose.cleanup_threshold = 10
+    Firehose.server.cleanup_threshold = 10
     stream = "cleanup-below-#{SecureRandom.hex(4)}"
 
     channel = create_messages(stream, 3)
@@ -67,7 +67,7 @@ describe Firehose::CleanupJob do
   end
 
   it "does nothing for empty stream" do
-    Firehose.cleanup_threshold = 5
+    Firehose.server.cleanup_threshold = 5
     stream = "cleanup-empty-#{SecureRandom.hex(4)}"
 
     Firehose::CleanupJob.perform_now(stream)
@@ -76,7 +76,7 @@ describe Firehose::CleanupJob do
   end
 
   it "only affects the specified stream" do
-    Firehose.cleanup_threshold = 3
+    Firehose.server.cleanup_threshold = 3
     stream_a = "cleanup-a-#{SecureRandom.hex(4)}"
     stream_b = "cleanup-b-#{SecureRandom.hex(4)}"
 
@@ -90,7 +90,7 @@ describe Firehose::CleanupJob do
   end
 
   it "handles threshold of 1" do
-    Firehose.cleanup_threshold = 1
+    Firehose.server.cleanup_threshold = 1
     stream = "cleanup-one-#{SecureRandom.hex(4)}"
 
     channel = create_messages(stream, 5)
@@ -103,7 +103,7 @@ describe Firehose::CleanupJob do
   end
 
   it "handles very large threshold" do
-    Firehose.cleanup_threshold = 1000
+    Firehose.server.cleanup_threshold = 1000
     stream = "cleanup-large-#{SecureRandom.hex(4)}"
 
     channel = create_messages(stream, 10)
@@ -114,7 +114,7 @@ describe Firehose::CleanupJob do
   end
 
   it "can be run multiple times safely" do
-    Firehose.cleanup_threshold = 5
+    Firehose.server.cleanup_threshold = 5
     stream = "cleanup-idempotent-#{SecureRandom.hex(4)}"
 
     channel = create_messages(stream, 10)
@@ -125,7 +125,7 @@ describe Firehose::CleanupJob do
   end
 
   it "deletes channel when all messages are cleaned up" do
-    Firehose.cleanup_threshold = 0
+    Firehose.server.cleanup_threshold = 0
     stream = "cleanup-delete-#{SecureRandom.hex(4)}"
 
     channel = create_messages(stream, 3)
@@ -138,7 +138,7 @@ describe Firehose::CleanupJob do
 
   with "concurrent cleanup" do
     it "handles messages added during cleanup" do
-      Firehose.cleanup_threshold = 5
+      Firehose.server.cleanup_threshold = 5
       stream = "cleanup-concurrent-#{SecureRandom.hex(4)}"
 
       channel = create_messages(stream, 10)

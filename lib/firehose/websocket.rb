@@ -39,7 +39,7 @@ module Firehose
         @connection = connection
         @controller = controller
         @streams = Set.new
-        @subscriptions = {}
+        @subscriptions = Firehose.server.subscriptions
         @queue = Async::Queue.new
       end
 
@@ -55,7 +55,9 @@ module Firehose
       rescue Protocol::WebSocket::ClosedError, EOFError, Async::Stop
         # Client disconnected
       ensure
-        cleanup
+        @subscriptions.close
+        @streams.clear
+        @queue.close
       end
 
       private
@@ -69,11 +71,19 @@ module Firehose
       end
 
       def write_messages
-        while (event = @queue.dequeue)
-          send_event(event)
+        while (payload = @queue.dequeue)
+          event = JSON.parse(payload, symbolize_names: true)
+          event = resolve_event(event) unless event.key?(:data)
+          send_event(event) if event
         end
       rescue Async::Stop
         # Task stopped
+      end
+
+      def resolve_event(event)
+        msg = Message.includes(:channel).find_by(id: event[:id])
+        return unless msg
+        { id: msg.id, channel_id: msg.channel_id, sequence: msg.sequence, stream: msg.channel.name, data: msg.data }
       end
 
       def handle_message(msg)
@@ -95,27 +105,14 @@ module Firehose
         replay_events(new_streams, last_event_id) if new_streams.any? && last_event_id > 0
 
         new_streams.each do |stream|
-          channel = Broadcaster.channel_name(stream)
-          callback = ->(message) {
-            data = message.respond_to?(:data) ? message.data : message
-            @queue.enqueue(JSON.parse(data))
-          }
-          ActionCable.server.pubsub.subscribe(channel, callback)
-          @subscriptions[stream] = callback
+          @subscriptions.add(stream) { |payload| @queue.enqueue(payload) }
         end
       end
 
       def unsubscribe(streams)
-        streams = Array(streams).map(&:to_s)
-
-        streams.each do |stream|
+        Array(streams).map(&:to_s).each do |stream|
           @streams.delete(stream)
-          if @subscriptions[stream]
-            ActionCable.server.pubsub.unsubscribe(
-              Broadcaster.channel_name(stream),
-              @subscriptions.delete(stream)
-            )
-          end
+          @subscriptions.remove(stream)
         end
       end
 
@@ -136,15 +133,6 @@ module Firehose
         message = Protocol::WebSocket::TextMessage.generate(event)
         @connection.write(message)
         @connection.flush
-      end
-
-      def cleanup
-        @subscriptions.each do |stream, callback|
-          ActionCable.server.pubsub.unsubscribe(Broadcaster.channel_name(stream), callback)
-        end
-        @subscriptions.clear
-        @streams.clear
-        @queue.close
       end
     end
   end

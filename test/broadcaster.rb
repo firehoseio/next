@@ -1,6 +1,6 @@
 require_relative "../../../config/environment"
 
-describe Firehose::Broadcaster do
+describe Firehose::Server do
   it "creates a message in the database" do
     initial_count = Firehose::Message.count
 
@@ -50,8 +50,8 @@ describe Firehose::Broadcaster do
   end
 
   it "generates correct channel names" do
-    expect(Firehose::Broadcaster.channel_name("test")).to be == "firehose:test"
-    expect(Firehose::Broadcaster.channel_name("user:123")).to be == "firehose:user:123"
+    expect(Firehose.server.channel_name("test")).to be == "firehose:test"
+    expect(Firehose.server.channel_name("user:123")).to be == "firehose:user:123"
   end
 
   it "handles special characters in stream names" do
@@ -66,41 +66,39 @@ describe Firehose::Broadcaster do
   end
 
   with "pubsub integration" do
-    it "broadcasts to ActionCable pubsub with channel_id and sequence" do
+    it "notifies subscribers with the full event" do
       stream = "pubsub-test-#{SecureRandom.hex(4)}"
-      channel = Firehose::Broadcaster.channel_name(stream)
+      channel = Firehose.server.channel_name(stream)
       received = []
 
-      callback = ->(message) {
-        data = message.respond_to?(:data) ? message.data : message
-        received << JSON.parse(data)
-      }
+      callback = ->(payload) { received << payload }
 
-      ActionCable.server.pubsub.subscribe(channel, callback)
+      Firehose.server.subscribe(channel, callback)
       sleep 0.1
 
       message = Firehose.broadcast(stream, "test-message")
       sleep 0.2
 
-      ActionCable.server.pubsub.unsubscribe(channel, callback)
+      Firehose.server.unsubscribe(channel, callback)
 
       expect(received.length).to be == 1
-      expect(received.first["id"]).to be == message.id
-      expect(received.first["stream"]).to be == stream
-      expect(received.first["data"]).to be == "test-message"
-      expect(received.first["channel_id"]).to be == message.channel_id
-      expect(received.first["sequence"]).to be == message.sequence
+
+      event = JSON.parse(received.first, symbolize_names: true)
+      expect(event[:id]).to be == message.id
+      expect(event[:sequence]).to be == message.sequence
+      expect(event[:stream]).to be == stream
+      expect(event[:data]).to be == "test-message"
     end
   end
 
   with "cleanup threshold" do
     before do
-      @original_threshold = Firehose.cleanup_threshold
-      Firehose.cleanup_threshold = 5
+      @original_threshold = Firehose.server.cleanup_threshold
+      Firehose.server.cleanup_threshold = 5
     end
 
     after do
-      Firehose.cleanup_threshold = @original_threshold
+      Firehose.server.cleanup_threshold = @original_threshold
     end
 
     it "does not trigger cleanup below threshold" do

@@ -21,37 +21,5 @@ module Firehose
     def build_event(event)
       event
     end
-
-    private
-
-    def firehose_replay_events(streams, since_id)
-      channel_ids = Channel.where(name: streams).pluck(:id)
-      Message
-        .where(channel_id: channel_ids)
-        .where("id > ?", since_id)
-        .order(:id)
-    end
-
-    def firehose_subscribe(streams, queue)
-      subscriptions = {}
-
-      streams.each do |stream|
-        channel = Broadcaster.channel_name(stream)
-        callback = ->(message) {
-          data = message.respond_to?(:data) ? message.data : message
-          queue << JSON.parse(data)
-        }
-        ActionCable.server.pubsub.subscribe(channel, callback)
-        subscriptions[stream] = callback
-      end
-
-      subscriptions
-    end
-
-    def firehose_unsubscribe(subscriptions)
-      subscriptions.each do |stream, callback|
-        ActionCable.server.pubsub.unsubscribe(Broadcaster.channel_name(stream), callback)
-      end
-    end
   end
 end

@@ -61,7 +61,7 @@ module Firehose
         @response = response
         @streams = streams
         @controller = controller
-        @subscriptions = {}
+        @subscriptions = Firehose.server.subscriptions
         @queue = Async::Queue.new
       end
 
@@ -79,7 +79,8 @@ module Firehose
         # Client disconnected
       ensure
         writer_task&.stop
-        cleanup
+        @subscriptions.close
+        @queue.close
       end
 
       private
@@ -102,13 +103,7 @@ module Firehose
 
       def subscribe_to_streams
         @streams.each do |stream|
-          channel = Broadcaster.channel_name(stream)
-          callback = ->(message) {
-            data = message.respond_to?(:data) ? message.data : message
-            @queue.enqueue(JSON.parse(data))
-          }
-          ActionCable.server.pubsub.subscribe(channel, callback)
-          @subscriptions[stream] = callback
+          @subscriptions.add(stream) { |payload| @queue.enqueue(payload) }
         end
 
         # Keep connection open waiting for events
@@ -118,11 +113,19 @@ module Firehose
       end
 
       def write_messages
-        while (event = @queue.dequeue)
-          write_event(event)
+        while (payload = @queue.dequeue)
+          event = JSON.parse(payload, symbolize_names: true)
+          event = resolve_event(event) unless event.key?(:data)
+          write_event(event) if event
         end
       rescue Async::Stop
         # Task stopped
+      end
+
+      def resolve_event(event)
+        msg = Message.includes(:channel).find_by(id: event[:id])
+        return unless msg
+        { id: msg.id, channel_id: msg.channel_id, sequence: msg.sequence, stream: msg.channel.name, data: msg.data }
       end
 
       def write_event(event)
@@ -135,14 +138,6 @@ module Firehose
         body.write("event: #{event[:stream]}\n")
         data = { data: event[:data], channel_id: event[:channel_id], sequence: event[:sequence] }.to_json
         body.write("data: #{data}\n\n")
-      end
-
-      def cleanup
-        @subscriptions.each do |stream, callback|
-          ActionCable.server.pubsub.unsubscribe(Broadcaster.channel_name(stream), callback)
-        end
-        @subscriptions.clear
-        @queue.close
       end
     end
   end

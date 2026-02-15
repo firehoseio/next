@@ -6,7 +6,7 @@ module Firehose
 
       cutoff_id = channel.messages
         .order(sequence: :desc)
-        .offset(Firehose.cleanup_threshold)
+        .offset(Firehose.server.cleanup_threshold)
         .limit(1)
         .pick(:id)
 
