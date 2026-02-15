@@ -4,6 +4,28 @@ Real-time streaming for Rails with WebSocket and SSE transports, database-backed
 
 Built on a dedicated PostgreSQL LISTEN/NOTIFY connection — no ActionCable, no polling, no connection pool pressure.
 
+## Why not ActionCable?
+
+ActionCable is fire-and-forget. Messages are published into Redis pub/sub with no persistence — if a client is disconnected when a message arrives, that message is gone. There's no way to know what was missed, and no way to catch up.
+
+This matters more than it sounds. Mobile users tunnel through subways. Laptops go to sleep. WiFi drops for a few seconds during a video call. Browser tabs get suspended by the OS to save memory. In every case, the WebSocket closes, messages fly by, and when the client reconnects it has no idea it missed anything. The UI is silently stale.
+
+ActionCable also has no concept of message ordering. If you broadcast three updates to a stream, there's no sequence number, no monotonic ID, nothing for the client to compare against. You can't detect a gap because there's nothing to detect a gap *in*.
+
+Firehose fixes this:
+
+- **Every message is persisted** in PostgreSQL with a monotonic sequence per stream and a global auto-incrementing ID. Messages are real database rows, not ephemeral pub/sub pings.
+
+- **Clients track their position** via `last_event_id`. The JavaScript client tracks the highest event ID it has seen. On reconnect, it sends this ID back to the server.
+
+- **Replay on reconnect.** The server queries all messages with `id > last_event_id` across the client's subscribed streams and replays them in order before resuming live delivery. The client sees every message, in order, with no gaps.
+
+- **Sequence numbers detect channel resets.** Each stream has its own monotonic sequence counter. If a client sees sequence 5 followed by sequence 1, it knows the channel was reset (e.g., data was cleared, the stream was recreated). The client can react accordingly — full refresh, re-fetch state, whatever makes sense for the application.
+
+- **The browser does most of the work.** The `<firehose-stream-source>` custom element handles subscribe, unsubscribe, reconnection with exponential backoff, and `last_event_id` tracking automatically. Drop the element in your HTML and forget about it.
+
+- **No Redis.** Everything runs on PostgreSQL, which you already have. LISTEN/NOTIFY for real-time fan-out, regular tables for persistence. One fewer piece of infrastructure.
+
 ## Quick Start
 
 Add to your Gemfile:
