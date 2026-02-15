@@ -122,7 +122,7 @@ class Comment < ApplicationRecord
   after_commit :notify_post
 
   def notify_post
-    Firehose[post.to_gid_param].publish("refresh")
+    Firehose.channel(post.to_gid_param).publish("refresh")
   end
 end
 ```
