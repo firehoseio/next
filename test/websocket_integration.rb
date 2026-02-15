@@ -1,4 +1,4 @@
-require_relative "../../../config/environment"
+require_relative "test_helper"
 require "async"
 require "async/websocket/client"
 require "async/http/endpoint"

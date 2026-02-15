@@ -47,4 +47,4 @@ require_relative "firehose/websocket"
 require_relative "firehose/sse"
 require_relative "firehose/queue"
 require_relative "firehose/stream"
-require_relative "firehose/helper"
+require_relative "firehose/helper" if defined?(Phlex)

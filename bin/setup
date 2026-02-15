@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-IFS=$'\n\t'
 
 bundle install
+createdb firehose_test 2>/dev/null || true

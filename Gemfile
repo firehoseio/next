@@ -5,4 +5,5 @@ gemspec
 group :test do
   gem "sus"
   gem "sus-fixtures-async"
+  gem "falcon"
 end

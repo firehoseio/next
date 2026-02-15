@@ -1,4 +1,4 @@
-require_relative "../../../config/environment"
+require_relative "test_helper"
 
 describe Firehose::Server do
   it "creates a message in the database" do
