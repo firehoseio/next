@@ -2,13 +2,17 @@
 
 Real-time streaming for Rails with WebSocket and SSE transports, database-backed persistence, and automatic replay on reconnect.
 
+Built on a dedicated PostgreSQL LISTEN/NOTIFY connection — no ActionCable, no polling, no connection pool pressure.
+
 ## Features
 
 - **Dual transports**: WebSocket and Server-Sent Events (SSE)
-- **Database persistence**: Events stored in PostgreSQL for replay
-- **Automatic replay**: Clients reconnect and receive missed events via `Last-Event-ID`
-- **PostgreSQL LISTEN/NOTIFY**: Instant delivery via ActionCable pubsub
-- **Auto-cleanup**: Configurable threshold keeps last N events per stream
+- **Database persistence**: Messages stored in PostgreSQL for replay on reconnect
+- **Automatic replay**: Missed events delivered via `Last-Event-ID` (SSE) or `last_event_id` (WebSocket)
+- **Dedicated PG connection**: LISTEN/NOTIFY outside the ActiveRecord pool, PgBouncer-safe with direct connection
+- **Inline delivery**: Small payloads sent inline via NOTIFY (no DB round-trip), large payloads fall back to DB fetch
+- **Ruby queue**: `Firehose::Queue` for server-side push/pop over PG LISTEN/NOTIFY
+- **Auto-cleanup**: Configurable threshold keeps the last N messages per stream
 - **Falcon-compatible**: Built for async Ruby with async-websocket
 
 ## Installation
@@ -16,39 +20,22 @@ Real-time streaming for Rails with WebSocket and SSE transports, database-backed
 Add to your Gemfile:
 
 ```ruby
-gem "firehose", path: "gems/firehose", require: false
-```
-
-Create an initializer to load after Rails boots:
-
-```ruby
-# config/initializers/firehose.rb
-require "firehose"
+gem "firehose", path: "gems/firehose"
 ```
 
 Run the migration:
 
-```ruby
-# db/migrate/TIMESTAMP_create_firehose_events.rb
-class CreateFirehoseEvents < ActiveRecord::Migration[8.0]
-  def change
-    create_table :firehose_events do |t|
-      t.text :stream, null: false
-      t.text :data, null: false
-      t.datetime :created_at, null: false, default: -> { "now()" }
-    end
-
-    add_index :firehose_events, [:stream, :id]
-  end
-end
+```bash
+bin/rails db:migrate
 ```
+
+The engine auto-discovers its migrations — no generator needed.
 
 ## Usage
 
 ### Broadcasting
 
 ```ruby
-# Broadcast to a stream
 Firehose.broadcast("dashboard", "refresh")
 Firehose.broadcast("user:42", "notification")
 
@@ -64,8 +51,6 @@ end
 
 ### Controller Setup
 
-Include the transport modules in your controller:
-
 ```ruby
 class FirehoseController < ApplicationController
   include Firehose::Stream  # Includes both WebSocket and SSE
@@ -76,7 +61,7 @@ class FirehoseController < ApplicationController
 end
 ```
 
-With authentication:
+With authentication and stream authorization:
 
 ```ruby
 class FirehoseController < ApplicationController
@@ -123,29 +108,71 @@ document.addEventListener("firehose:message", (e) => {
 
 ### Phlex Helper
 
-Include the helper in your base component:
-
 ```ruby
 class Components::Base < Phlex::HTML
   include Firehose::Helper
 end
 ```
 
-Then use in views:
-
-```erb
+```ruby
 firehose_stream_from @report
 firehose_stream_from "dashboard", "user:#{current_user.id}"
 firehose_stream_from @model, path: "/admin/firehose"
 ```
 
-## Configuration
+### Ruby Queue
+
+For server-side push/pop — ephemeral signaling over PG LISTEN/NOTIFY without database persistence:
 
 ```ruby
-# config/initializers/firehose.rb
-require "firehose"
+queue = Firehose.server.queue("my-channel")
 
-Firehose.cleanup_threshold = 100  # Keep last 100 events per stream (default)
+# Producer
+queue.push("hello")
+
+# Consumer (blocks until a message arrives)
+message = queue.pop
+message = queue.pop(timeout: 5) # raises Firehose::Queue::TimeoutError
+
+queue.close
+```
+
+## Configuration
+
+Create `config/firehose.rb` for Ruby configuration, or `config/firehose.yml` for YAML. Ruby config takes precedence.
+
+### Ruby
+
+```ruby
+# config/firehose.rb
+Firehose.server.configure do |config|
+  config.database_url       = ENV["FIREHOSE_DATABASE_URL"] # Direct PG connection (bypasses PgBouncer)
+  config.cleanup_threshold  = 100                          # Keep last N messages per stream (default: 100)
+  config.reconnect_attempts = 5                            # Max reconnect attempts (default: 5)
+  config.reconnect_delay    = 1                            # Base delay in seconds, doubles each attempt (default: 1)
+  config.notify_max_bytes   = 7999                         # PG NOTIFY payload limit (default: 7999)
+end
+```
+
+### YAML
+
+```yaml
+# config/firehose.yml
+development:
+  cleanup_threshold: 100
+
+production:
+  database_url: postgres://direct-db:5432/myapp
+  cleanup_threshold: 100
+  reconnect_attempts: 10
+```
+
+### Logger
+
+```ruby
+Firehose.logger = Rails.logger            # default in Rails
+Firehose.logger = Logger.new($stdout)     # outside Rails
+Firehose.logger.level = Logger::DEBUG     # verbose: LISTEN/UNLISTEN/NOTIFY
 ```
 
 ## Protocol
@@ -155,7 +182,7 @@ Firehose.cleanup_threshold = 100  # Keep last 100 events per stream (default)
 ```
 Client → Server: { "command": "subscribe", "streams": ["a", "b"], "last_event_id": 123 }
 Client → Server: { "command": "unsubscribe", "streams": ["a"] }
-Server → Client: { "id": 456, "stream": "a", "data": "refresh" }
+Server → Client: { "id": 456, "stream": "a", "data": "refresh", "sequence": 7, "channel_id": 3 }
 ```
 
 ### SSE
@@ -164,33 +191,33 @@ Server → Client: { "id": 456, "stream": "a", "data": "refresh" }
 GET /firehose/sse?streams=a,b
 Last-Event-ID: 123
 
-Server → Client:
 id: 456
 event: a
-data: refresh
+data: {"data":"refresh","channel_id":3,"sequence":7}
 ```
 
 ## Architecture
 
 ```
-Firehose.broadcast("stream", "data")
-    ↓
-1. INSERT into firehose_events (persistence for replay)
-2. ActionCable.server.pubsub.broadcast (instant NOTIFY)
-    ↓
-FirehoseController (WebSocket or SSE endpoint)
-    ↓
-Browser → Turbo page refresh
+Firehose.broadcast("stream", "refresh")
+    │
+    ├── INSERT into firehose_messages (persistence for replay)
+    │
+    └── PG NOTIFY with inline event JSON (or message ID if > 8KB)
+            │
+            ▼
+    Server background thread (IO.select on PG socket)
+            │
+            ├── WebSocket handler → browser → Turbo page refresh
+            ├── SSE handler → browser → Turbo page refresh
+            └── Firehose::Queue → Ruby consumer
 ```
 
-## Why Firehose 2.0?
+**Live path**: NOTIFY carries the full event inline — no database round-trip.
 
-This is a complete rewrite focused on:
+**Replay path**: On reconnect, missed messages fetched from database by ID.
 
-- **Simplicity**: No complex channel abstractions, just streams and data
-- **Reliability**: Database persistence ensures no missed events
-- **Flexibility**: Works with any auth system via controller callbacks
-- **Performance**: PostgreSQL LISTEN/NOTIFY for instant delivery, no polling
+**Connection model**: One dedicated PG connection per process. LISTEN stays on this connection (PG requirement). NOTIFY commands are non-blocking (queued to background thread).
 
 ## License
 
