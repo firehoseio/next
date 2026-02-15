@@ -10,7 +10,7 @@ describe Firehose::CleanupJob do
   end
 
   def create_messages(stream, count)
-    channel = Firehose::Channel.find_or_create_by!(name: stream)
+    channel = Firehose::Models::Channel.find_or_create_by!(name: stream)
     count.times do |i|
       seq = channel.sequence + 1
       channel.update_columns(sequence: seq)
@@ -72,7 +72,7 @@ describe Firehose::CleanupJob do
 
     Firehose::CleanupJob.perform_now(stream)
 
-    expect(Firehose::Channel.find_by(name: stream)).to be_nil
+    expect(Firehose::Models::Channel.find_by(name: stream)).to be_nil
   end
 
   it "only affects the specified stream" do
@@ -129,11 +129,11 @@ describe Firehose::CleanupJob do
     stream = "cleanup-delete-#{SecureRandom.hex(4)}"
 
     channel = create_messages(stream, 3)
-    expect(Firehose::Channel.find_by(name: stream)).not.to be_nil
+    expect(Firehose::Models::Channel.find_by(name: stream)).not.to be_nil
 
     Firehose::CleanupJob.perform_now(stream)
 
-    expect(Firehose::Channel.find_by(name: stream)).to be_nil
+    expect(Firehose::Models::Channel.find_by(name: stream)).to be_nil
   end
 
   with "concurrent cleanup" do

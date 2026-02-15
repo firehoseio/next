@@ -26,6 +26,40 @@ Firehose fixes this:
 
 - **No Redis.** Everything runs on PostgreSQL, which you already have. LISTEN/NOTIFY for real-time fan-out, regular tables for persistence. One fewer piece of infrastructure.
 
+## Prior Art
+
+### ActionCable + Redis
+
+The default Rails real-time stack. Redis pub/sub distributes messages across processes — fast, simple, and well-documented. But Redis pub/sub is ephemeral: messages exist only in the moment they're published. No persistence, no replay, no sequence numbers. The JavaScript client reconnects automatically but starts from zero every time. Works fine when "best effort" delivery is acceptable and you don't mind the occasional stale UI after a reconnect.
+
+### SolidCable
+
+37signals' database-backed ActionCable adapter, shipping with Rails 8. Replaces Redis with a `solid_cable_messages` table — each process polls for new messages by ID. Eliminates Redis as a dependency, which is great. The messages *are* in the database with auto-incrementing IDs, so the raw material for replay is right there. But SolidCable doesn't expose it: the ActionCable client has no `last_event_id` concept, so reconnection still means missed messages. Polling also introduces a small latency floor (default 100ms) compared to LISTEN/NOTIFY which is near-instant.
+
+### AnyCable
+
+Moves WebSocket connection handling to a Go or Rust server, calling back to Rails via gRPC for channel logic. Dramatically better connection scalability — tens of thousands of connections instead of hundreds. The commercial Pro version adds reliable streams with epoch+offset tracking and replay on reconnect, which solves the persistence gap. The open-source version is fire-and-forget like ActionCable. Requires deploying and operating a separate server process, plus Redis or NATS for pub/sub between the Go server and Rails.
+
+### Turbo Streams / Broadcasts
+
+A presentation layer on top of ActionCable, not a transport. Broadcasts `<turbo-stream>` HTML fragments that surgically update the DOM. Turbo 8's page refresh (morphing) simplifies this — broadcast `"refresh"` and the client re-fetches the full page, sidestepping DOM-ID coupling. Page refresh partially mitigates missed messages since each refresh fetches complete state, but the refresh *signal* itself can still be lost during a disconnection window. Inherits all of ActionCable's delivery guarantees (none).
+
+### Mercure
+
+A standalone SSE hub (written in Go) with built-in persistence and `Last-Event-ID` replay. Closest in philosophy to Firehose — messages are persisted, clients resume from where they left off, and SSE's native reconnection handles the transport. Not Rails-specific and requires deploying a separate server. SSE is unidirectional (server-to-client), so client-to-server communication needs separate HTTP requests.
+
+### How Firehose Compares
+
+| | ActionCable | SolidCable | AnyCable Pro | Mercure | **Firehose** |
+|---|---|---|---|---|---|
+| **Replay on reconnect** | No | No | Yes | Yes | **Yes** |
+| **Message persistence** | No | Yes (no replay API) | Yes | Yes | **Yes** |
+| **Sequence numbers** | No | No | Epoch+offset | Event IDs | **Per-stream monotonic** |
+| **Infrastructure** | Redis | Database | Go/Rust + Redis/NATS | Go hub | **PostgreSQL** |
+| **Transport** | WebSocket | WebSocket | WebSocket | SSE | **WebSocket + SSE** |
+| **Latency** | ~instant | ~100ms (polling) | ~instant | ~instant | **~instant (NOTIFY)** |
+| **Extra processes** | No | No | Yes | Yes | **No** |
+
 ## Quick Start
 
 Add to your Gemfile:
@@ -43,10 +77,10 @@ bin/rails generate firehose:install
 
 This creates a `FirehoseController`, adds routes, wires up the JavaScript client, and runs migrations.
 
-Broadcast from anywhere in your app:
+Publish from anywhere in your app:
 
 ```ruby
-Firehose.broadcast("dashboard", "refresh")
+Firehose.channel("dashboard").publish("refresh")
 ```
 
 Subscribe in your views:
@@ -67,20 +101,47 @@ The page will automatically refresh via Turbo when an event arrives.
 - **Auto-cleanup**: Configurable threshold keeps the last N messages per stream
 - **Falcon-compatible**: Built for async Ruby with async-websocket
 
-## Broadcasting
+## Channels
+
+Channels are the primary API for publishing and subscribing:
 
 ```ruby
-Firehose.broadcast("dashboard", "refresh")
-Firehose.broadcast("user:42", "notification")
+# Get a channel
+channel = Firehose.channel("dashboard")
+
+# Publish a message (persists to DB + NOTIFY)
+channel.publish("refresh")
+channel.publish({ action: "update", id: 42 }.to_json)
+
+# Subscribe to live events (returns a closeable subscription)
+sub = channel.subscribe { |payload| puts payload }
+sub.close
 
 # From a model
 class Comment < ApplicationRecord
   after_commit :notify_post
 
   def notify_post
-    Firehose.broadcast(post.to_gid_param, "refresh")
+    Firehose[post.to_gid_param].publish("refresh")
   end
 end
+```
+
+## Queues
+
+Queues provide ephemeral push/pop signaling over PG LISTEN/NOTIFY — no database persistence, no replay. Use them for transient coordination like auth nonces, job completion signals, or request/response patterns between processes.
+
+```ruby
+queue = Firehose.server.queue("my-queue")
+
+# Producer
+queue.push("hello")
+
+# Consumer (blocks until a message arrives)
+message = queue.pop
+message = queue.pop(timeout: 5) # raises Firehose::Queue::TimeoutError
+
+queue.close
 ```
 
 ## Controller
@@ -153,7 +214,7 @@ document.addEventListener("firehose:message", (e) => {
 
 ### Turbo Integration
 
-When an event has `data: "refresh"`, the client automatically triggers a Turbo page refresh. No additional setup needed — just broadcast `"refresh"` as your data payload.
+When an event has `data: "refresh"`, the client automatically triggers a Turbo page refresh. No additional setup needed — just publish `"refresh"` as your data payload.
 
 ## Phlex Helper
 
@@ -231,7 +292,7 @@ data: {"data":"refresh","channel_id":3,"sequence":7}
 ## Architecture
 
 ```
-Firehose.broadcast("stream", "refresh")
+Firehose.channel("stream").publish("refresh")
     │
     ├── INSERT into firehose_messages (persistence for replay)
     │

@@ -92,8 +92,8 @@ module Firehose
       def replay_events
         return unless last_event_id > 0
 
-        channels = Channel.where(name: @streams)
-        Message
+        channels = Models::Channel.where(name: @streams)
+        Models::Message
           .where(channel_id: channels.select(:id))
           .where("id > ?", last_event_id)
           .includes(:channel)
@@ -123,7 +123,7 @@ module Firehose
       end
 
       def resolve_event(event)
-        msg = Message.includes(:channel).find_by(id: event[:id])
+        msg = Models::Message.includes(:channel).find_by(id: event[:id])
         return unless msg
         { id: msg.id, channel_id: msg.channel_id, sequence: msg.sequence, stream: msg.channel.name, data: msg.data }
       end

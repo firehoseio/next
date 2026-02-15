@@ -1,7 +1,7 @@
 module Firehose
   class CleanupJob < ActiveJob::Base
     def perform(stream)
-      channel = Channel.find_by(name: stream)
+      channel = Models::Channel.find_by(name: stream)
       return unless channel
 
       cutoff_id = channel.messages

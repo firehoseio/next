@@ -2,34 +2,34 @@ require_relative "test_helper"
 
 describe Firehose::Server do
   it "creates a message in the database" do
-    initial_count = Firehose::Message.count
+    initial_count = Firehose::Models::Message.count
 
-    message = Firehose.broadcast("test-broadcast", "refresh")
+    message = Firehose.channel("test-broadcast").publish("refresh")
 
-    expect(Firehose::Message.count).to be == initial_count + 1
+    expect(Firehose::Models::Message.count).to be == initial_count + 1
     expect(message.channel.name).to be == "test-broadcast"
     expect(message.data).to be == "refresh"
   end
 
   it "returns the created message" do
-    message = Firehose.broadcast("return-test", "data")
+    message = Firehose.channel("return-test").publish("data")
 
-    expect(message).to be_a(Firehose::Message)
+    expect(message).to be_a(Firehose::Models::Message)
     expect(message.persisted?).to be == true
   end
 
   it "converts stream and data to strings" do
-    message = Firehose.broadcast(:symbol_stream, 12345)
+    message = Firehose.channel(:symbol_stream).publish(12345)
 
     expect(message.channel.name).to be == "symbol_stream"
     expect(message.data).to be == "12345"
   end
 
   it "assigns monotonic sequences per channel" do
-    stream = "seq-test-#{SecureRandom.hex(4)}"
-    m1 = Firehose.broadcast(stream, "first")
-    m2 = Firehose.broadcast(stream, "second")
-    m3 = Firehose.broadcast(stream, "third")
+    channel = Firehose.channel("seq-test-#{SecureRandom.hex(4)}")
+    m1 = channel.publish("first")
+    m2 = channel.publish("second")
+    m3 = channel.publish("third")
 
     expect(m1.sequence).to be == 1
     expect(m2.sequence).to be == 2
@@ -37,12 +37,12 @@ describe Firehose::Server do
   end
 
   it "maintains independent sequences per channel" do
-    stream_a = "seq-a-#{SecureRandom.hex(4)}"
-    stream_b = "seq-b-#{SecureRandom.hex(4)}"
+    channel_a = Firehose.channel("seq-a-#{SecureRandom.hex(4)}")
+    channel_b = Firehose.channel("seq-b-#{SecureRandom.hex(4)}")
 
-    a1 = Firehose.broadcast(stream_a, "a1")
-    b1 = Firehose.broadcast(stream_b, "b1")
-    a2 = Firehose.broadcast(stream_a, "a2")
+    a1 = channel_a.publish("a1")
+    b1 = channel_b.publish("b1")
+    a2 = channel_a.publish("a2")
 
     expect(a1.sequence).to be == 1
     expect(b1.sequence).to be == 1
@@ -55,31 +55,28 @@ describe Firehose::Server do
   end
 
   it "handles special characters in stream names" do
-    message = Firehose.broadcast("stream/with:special-chars_123", "data")
+    message = Firehose.channel("stream/with:special-chars_123").publish("data")
     expect(message.channel.name).to be == "stream/with:special-chars_123"
   end
 
   it "handles GlobalID-style stream names" do
     stream = "Z2lkOi8vc2VydmVyL0luc2lnaHRzOjpSZXBvcnQvMTQ"
-    message = Firehose.broadcast(stream, "refresh")
+    message = Firehose.channel(stream).publish("refresh")
     expect(message.channel.name).to be == stream
   end
 
   with "pubsub integration" do
     it "notifies subscribers with the full event" do
       stream = "pubsub-test-#{SecureRandom.hex(4)}"
-      channel = Firehose.server.channel_name(stream)
       received = []
 
-      callback = ->(payload) { received << payload }
-
-      Firehose.server.subscribe(channel, callback)
+      sub = Firehose.channel(stream).subscribe { |payload| received << payload }
       sleep 0.1
 
-      message = Firehose.broadcast(stream, "test-message")
+      message = Firehose.channel(stream).publish("test-message")
       sleep 0.2
 
-      Firehose.server.unsubscribe(channel, callback)
+      sub.close
 
       expect(received.length).to be == 1
 
@@ -104,30 +101,30 @@ describe Firehose::Server do
     it "does not trigger cleanup below threshold" do
       stream = "below-threshold-#{SecureRandom.hex(4)}"
 
-      4.times { |i| Firehose.broadcast(stream, "event-#{i}") }
+      4.times { |i| Firehose.channel(stream).publish("event-#{i}") }
 
-      channel = Firehose::Channel.find_by!(name: stream)
+      channel = Firehose::Models::Channel.find_by!(name: stream)
       expect(channel.messages.count).to be == 4
     end
 
     it "triggers cleanup when threshold exceeded" do
       stream = "cleanup-test-#{SecureRandom.hex(4)}"
 
-      6.times { |i| Firehose.broadcast(stream, "event-#{i}") }
+      6.times { |i| Firehose.channel(stream).publish("event-#{i}") }
 
       # CleanupJob runs async via GoodJob — invoke directly to verify behavior
       Firehose::CleanupJob.perform_now(stream)
 
-      channel = Firehose::Channel.find_by!(name: stream)
+      channel = Firehose::Models::Channel.find_by!(name: stream)
       expect(channel.messages.count).to be == 5
     end
   end
 
   with "concurrent broadcasts" do
     it "handles rapid sequential broadcasts" do
-      stream = "rapid-#{SecureRandom.hex(4)}"
+      channel = Firehose.channel("rapid-#{SecureRandom.hex(4)}")
 
-      messages = 10.times.map { |i| Firehose.broadcast(stream, "msg-#{i}") }
+      messages = 10.times.map { |i| channel.publish("msg-#{i}") }
 
       expect(messages.length).to be == 10
       expect(messages.map(&:id)).to be == messages.map(&:id).sort

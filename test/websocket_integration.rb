@@ -50,8 +50,9 @@ describe Firehose::Stream do
 
   it "handles subscribe command and replays events" do
     # Create some events first
-    msg1 = Firehose.broadcast("ws-test", "event-1")
-    msg2 = Firehose.broadcast("ws-test", "event-2")
+    channel = Firehose.channel("ws-test")
+    msg1 = channel.publish("event-1")
+    msg2 = channel.publish("event-2")
 
     with_server do
       Async::WebSocket::Client.connect(endpoint) do |connection|
@@ -109,14 +110,14 @@ describe Firehose::Stream do
         connection.write(Protocol::WebSocket::TextMessage.generate({
           command: "subscribe",
           streams: ["live-test"],
-          last_event_id: Firehose::Message.maximum(:id) || 0
+          last_event_id: Firehose::Models::Message.maximum(:id) || 0
         }))
         connection.flush
 
         # Broadcast an event (in a separate task so it doesn't block)
         Async do
           sleep 0.1
-          Firehose.broadcast("live-test", "live-event")
+          Firehose.channel("live-test").publish("live-event")
         end
 
         # Should receive the live event

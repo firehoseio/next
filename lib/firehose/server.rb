@@ -71,7 +71,7 @@ module Firehose
       stream = stream.to_s
       data = data.to_s
 
-      channel = Channel.find_or_create_by!(name: stream)
+      channel = Models::Channel.find_or_create_by!(name: stream)
 
       message = channel.with_lock do
         channel.increment!(:sequence)

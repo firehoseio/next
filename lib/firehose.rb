@@ -1,22 +1,22 @@
 # Firehose: WebSocket and SSE streaming with database-backed replay
 #
 # Usage:
-#   Firehose.broadcast("stream_name", "data")
+#   Firehose.channel("dashboard").publish("refresh")
+#
+#   sub = Firehose.channel("dashboard").subscribe { |event| puts event }
+#   sub.close
 #
 # Controller:
-#   class CableController < ApplicationController
+#   class FirehoseController < ApplicationController
 #     include Firehose::Stream
 #   end
-#
-# Configuration:
-#   Firehose.cleanup_threshold = 100  # messages per stream before cleanup
 #
 module Firehose
   VERSION = "2.0.0"
 
   class << self
-    def broadcast(stream, data)
-      server.broadcast(stream, data)
+    def channel(name)
+      Channel.new(name, server:)
     end
 
     def server
@@ -38,8 +38,9 @@ module Firehose
 end
 
 require_relative "firehose/engine"
+require_relative "firehose/models/channel"
+require_relative "firehose/models/message"
 require_relative "firehose/channel"
-require_relative "firehose/message"
 require_relative "firehose/server"
 require_relative "firehose/cleanup_job"
 require_relative "firehose/streamable"

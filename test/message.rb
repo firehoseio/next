@@ -1,9 +1,9 @@
 require_relative "test_helper"
 
-describe Firehose::Channel do
+describe Firehose::Models::Channel do
   it "creates channels with name" do
     name = "test-channel-#{SecureRandom.hex(4)}"
-    channel = Firehose::Channel.create!(name:)
+    channel = Firehose::Models::Channel.create!(name:)
 
     expect(channel.id).to be_a(Integer)
     expect(channel.name).to be == name
@@ -13,26 +13,26 @@ describe Firehose::Channel do
 
   it "enforces unique channel names" do
     name = "unique-test-#{SecureRandom.hex(4)}"
-    Firehose::Channel.create!(name:)
+    Firehose::Models::Channel.create!(name:)
 
-    expect { Firehose::Channel.create!(name:) }.to raise_exception(ActiveRecord::RecordNotUnique)
+    expect { Firehose::Models::Channel.create!(name:) }.to raise_exception(ActiveRecord::RecordNotUnique)
   end
 
   it "cascades deletes to messages" do
-    channel = Firehose::Channel.create!(name: "cascade-#{SecureRandom.hex(4)}")
+    channel = Firehose::Models::Channel.create!(name: "cascade-#{SecureRandom.hex(4)}")
     channel.messages.create!(sequence: 1, data: "msg1")
     channel.messages.create!(sequence: 2, data: "msg2")
 
-    expect(Firehose::Message.where(channel_id: channel.id).count).to be == 2
+    expect(Firehose::Models::Message.where(channel_id: channel.id).count).to be == 2
 
     channel.destroy
 
-    expect(Firehose::Message.where(channel_id: channel.id).count).to be == 0
+    expect(Firehose::Models::Message.where(channel_id: channel.id).count).to be == 0
   end
 end
 
-describe Firehose::Message do
-  let(:channel) { Firehose::Channel.create!(name: "msg-test-#{SecureRandom.hex(4)}") }
+describe Firehose::Models::Message do
+  let(:channel) { Firehose::Models::Channel.create!(name: "msg-test-#{SecureRandom.hex(4)}") }
 
   it "creates messages with channel, sequence, and data" do
     message = channel.messages.create!(sequence: 1, data: "hello")
@@ -47,7 +47,7 @@ describe Firehose::Message do
   it "persists messages to the database" do
     message = channel.messages.create!(sequence: 1, data: "world")
 
-    found = Firehose::Message.find(message.id)
+    found = Firehose::Models::Message.find(message.id)
     expect(found.data).to be == "world"
     expect(found.channel_id).to be == channel.id
   end
@@ -75,7 +75,7 @@ describe Firehose::Message do
   end
 
   it "allows same sequence in different channels" do
-    other = Firehose::Channel.create!(name: "other-#{SecureRandom.hex(4)}")
+    other = Firehose::Models::Channel.create!(name: "other-#{SecureRandom.hex(4)}")
 
     m1 = channel.messages.create!(sequence: 1, data: "a")
     m2 = other.messages.create!(sequence: 1, data: "b")
@@ -95,7 +95,7 @@ describe Firehose::Message do
 
   it "handles unicode data" do
     message = channel.messages.create!(sequence: 1, data: "Hello 🌍 世界")
-    found = Firehose::Message.find(message.id)
+    found = Firehose::Models::Message.find(message.id)
     expect(found.data).to be == "Hello 🌍 世界"
   end
 
@@ -103,14 +103,14 @@ describe Firehose::Message do
     json_data = { action: "refresh", payload: { id: 123 } }.to_json
     message = channel.messages.create!(sequence: 1, data: json_data)
 
-    found = Firehose::Message.find(message.id)
+    found = Firehose::Models::Message.find(message.id)
     parsed = JSON.parse(found.data)
     expect(parsed["action"]).to be == "refresh"
   end
 
   with "multiple channels" do
-    let(:channel_a) { Firehose::Channel.create!(name: "stream-a-#{SecureRandom.hex(4)}") }
-    let(:channel_b) { Firehose::Channel.create!(name: "stream-b-#{SecureRandom.hex(4)}") }
+    let(:channel_a) { Firehose::Models::Channel.create!(name: "stream-a-#{SecureRandom.hex(4)}") }
+    let(:channel_b) { Firehose::Models::Channel.create!(name: "stream-b-#{SecureRandom.hex(4)}") }
 
     before do
       channel_a.messages.create!(sequence: 1, data: "a1")
@@ -119,17 +119,17 @@ describe Firehose::Message do
     end
 
     it "filters by channel" do
-      messages = Firehose::Message.where(channel_id: channel_a.id)
+      messages = Firehose::Models::Message.where(channel_id: channel_a.id)
       expect(messages.count).to be == 2
     end
 
     it "filters by multiple channels" do
-      messages = Firehose::Message.where(channel_id: [channel_a.id, channel_b.id])
+      messages = Firehose::Models::Message.where(channel_id: [channel_a.id, channel_b.id])
       expect(messages.count).to be == 3
     end
 
     it "orders by ID ascending" do
-      messages = Firehose::Message.where(channel_id: channel_a.id).order(:id)
+      messages = Firehose::Models::Message.where(channel_id: channel_a.id).order(:id)
       expect(messages.first.data).to be == "a1"
       expect(messages.last.data).to be == "a2"
     end
@@ -146,7 +146,7 @@ describe Firehose::Message do
     it "fetches messages after a given ID" do
       messages = create_messages(channel)
       since_id = messages[1].id
-      result = Firehose::Message.where(channel_id: channel.id).where("id > ?", since_id).order(:id)
+      result = Firehose::Models::Message.where(channel_id: channel.id).where("id > ?", since_id).order(:id)
 
       expect(result.count).to be == 3
       expect(result.first.data).to be == "event-2"
@@ -155,14 +155,14 @@ describe Firehose::Message do
     it "returns empty when no messages after ID" do
       messages = create_messages(channel)
       since_id = messages.last.id
-      result = Firehose::Message.where(channel_id: channel.id).where("id > ?", since_id)
+      result = Firehose::Models::Message.where(channel_id: channel.id).where("id > ?", since_id)
 
       expect(result.count).to be == 0
     end
 
     it "returns all messages when since_id is 0" do
       create_messages(channel)
-      result = Firehose::Message.where(channel_id: channel.id).where("id > ?", 0).order(:id)
+      result = Firehose::Models::Message.where(channel_id: channel.id).where("id > ?", 0).order(:id)
       expect(result.count).to be == 5
     end
   end
