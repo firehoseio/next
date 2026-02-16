@@ -14,6 +14,11 @@
 module Firehose
   VERSION = "2.0.0"
 
+  module Models
+    autoload :Channel, "firehose/models/channel"
+    autoload :Message, "firehose/models/message"
+  end
+
   class << self
     def channel(name)
       Channel.new(name, server:)
@@ -38,8 +43,6 @@ module Firehose
 end
 
 require_relative "firehose/engine"
-require_relative "firehose/models/channel"
-require_relative "firehose/models/message"
 require_relative "firehose/channel"
 require_relative "firehose/server"
 require_relative "firehose/cleanup_job"
