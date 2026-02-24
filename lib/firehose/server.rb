@@ -1,4 +1,5 @@
 require "json"
+require "digest"
 
 module Firehose
   # Single-connection PG pubsub server. One per process.
@@ -97,8 +98,9 @@ module Firehose
     end
 
     def notify(channel, payload)
-      Firehose.logger.debug { "[Firehose] NOTIFY #{channel} (#{payload.bytesize}B)" }
-      enqueue([:notify, channel, payload])
+      pg_id = pg_identifier(channel)
+      Firehose.logger.debug { "[Firehose] NOTIFY #{channel} [#{pg_id}] (#{payload.bytesize}B)" }
+      enqueue([:notify, pg_id, payload])
     end
 
     def channel_name(stream)
@@ -107,16 +109,18 @@ module Firehose
 
     def subscribe(channel, callback)
       ensure_started!
-      if @registry.add(channel, callback)
-        Firehose.logger.debug { "[Firehose] LISTEN #{channel}" }
-        enqueue([:listen, channel])
+      pg_id = pg_identifier(channel)
+      if @registry.add(pg_id, callback)
+        Firehose.logger.debug { "[Firehose] LISTEN #{channel} [#{pg_id}]" }
+        enqueue([:listen, pg_id])
       end
     end
 
     def unsubscribe(channel, callback)
-      if @registry.remove(channel, callback)
-        Firehose.logger.debug { "[Firehose] UNLISTEN #{channel}" }
-        enqueue([:unlisten, channel])
+      pg_id = pg_identifier(channel)
+      if @registry.remove(pg_id, callback)
+        Firehose.logger.debug { "[Firehose] UNLISTEN #{channel} [#{pg_id}]" }
+        enqueue([:unlisten, pg_id])
       end
     end
 
@@ -129,6 +133,20 @@ module Firehose
     end
 
     private
+
+    PG_IDENTIFIER_MAX = 63
+
+    # SHA256 hex digest of the channel name, used as the PG LISTEN/NOTIFY
+    # identifier. PG silently truncates identifiers beyond 63 chars, which
+    # would cause LISTEN and NOTIFY to target different channels. Hashing
+    # guarantees a safe, fixed-length identifier for any input.
+    def pg_identifier(channel)
+      Digest::SHA256.hexdigest(channel).first(PG_IDENTIFIER_MAX)
+    end
+
+    def assert_pg_identifier!(identifier)
+      raise ArgumentError, "PG channel identifier too long (#{identifier.length}/#{PG_IDENTIFIER_MAX}): #{identifier}" if identifier.length > PG_IDENTIFIER_MAX
+    end
 
     def ensure_started!
       return if @started
@@ -230,10 +248,13 @@ module Firehose
 
         case cmd
         in [:listen, channel]
+          assert_pg_identifier!(channel)
           @conn.exec("LISTEN #{@conn.escape_identifier(channel)}")
         in [:unlisten, channel]
+          assert_pg_identifier!(channel)
           @conn.exec("UNLISTEN #{@conn.escape_identifier(channel)}")
         in [:notify, channel, payload]
+          assert_pg_identifier!(channel)
           pg_notify(channel, payload)
         in [:shutdown]
           return false
