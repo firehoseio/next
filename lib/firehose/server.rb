@@ -97,7 +97,12 @@ module Firehose
       message
     end
 
+    class PayloadTooLarge < StandardError; end
+
     def notify(channel, payload)
+      if payload.bytesize > @notify_max_bytes
+        raise PayloadTooLarge, "Payload #{payload.bytesize}B exceeds PG NOTIFY limit of #{@notify_max_bytes}B on #{channel}"
+      end
       pg_id = pg_identifier(channel)
       Firehose.logger.debug { "[Firehose] NOTIFY #{channel} [#{pg_id}] (#{payload.bytesize}B)" }
       enqueue([:notify, pg_id, payload])
@@ -265,16 +270,8 @@ module Firehose
       true
     end
 
-    # Send NOTIFY, stripping inline data if PG rejects the payload size.
-    # The pre-check in #broadcast catches most oversized payloads before
-    # they reach here. This rescue handles encoding edge cases where
-    # Ruby's bytesize and PG's limit disagree.
     def pg_notify(channel, payload)
       @conn.exec_params("SELECT pg_notify($1, $2)", [channel, payload])
-    rescue PG::InvalidParameterValue
-      stripped = JSON.parse(payload).except("data").to_json
-      @conn.exec_params("SELECT pg_notify($1, $2)", [channel, stripped])
-      Firehose.logger.debug { "[Firehose] Payload too large for #{channel}, sent without inline data" }
     end
 
     def receive_notifications
