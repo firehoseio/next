@@ -77,6 +77,33 @@ describe Firehose::Queue do
     end
   end
 
+  with "long channel names" do
+    let(:channel) { "queue-test-#{SecureRandom.hex(64)}" }
+
+    it "delivers messages on channels exceeding PG identifier limit" do
+      queue = Firehose.server.queue(channel)
+      queue.subscribe
+
+      Thread.new { sleep 0.1; Firehose.server.queue(channel).push("long-channel") }
+
+      result = queue.pop(timeout: 3)
+      expect(result).to be == "long-channel"
+    ensure
+      queue&.close
+    end
+  end
+
+  with "payload too large" do
+    it "raises PayloadTooLarge when message exceeds PG NOTIFY limit" do
+      queue = Firehose.server.queue(channel)
+      payload = "x" * (Firehose::Server::NOTIFY_MAX_BYTES + 1)
+
+      expect { queue.push(payload) }.to raise_exception(Firehose::Server::PayloadTooLarge)
+    ensure
+      queue&.close
+    end
+  end
+
   with "close" do
     it "unsubscribes from the server" do
       queue = Firehose.server.queue(channel)
