@@ -239,11 +239,12 @@ Create `config/firehose.rb` for Ruby configuration, or `config/firehose.yml` for
 ```ruby
 # config/firehose.rb
 Firehose.server.configure do |config|
-  config.database_url       = ENV["FIREHOSE_DATABASE_URL"] # Direct PG connection (bypasses PgBouncer)
-  config.cleanup_threshold  = 100                          # Keep last N messages per stream (default: 100)
-  config.reconnect_attempts = 5                            # Max reconnect attempts (default: 5)
-  config.reconnect_delay    = 1                            # Base delay in seconds, doubles each attempt (default: 1)
-  config.notify_max_bytes   = 7999                         # PG NOTIFY payload limit (default: 7999)
+  config.database_url        = ENV["FIREHOSE_DATABASE_URL"] # Direct PG connection (bypasses PgBouncer)
+  config.cleanup_threshold   = 100                          # Keep last N messages per stream (default: 100)
+  config.reconnect_attempts  = nil                          # Max reconnect attempts (default: nil = unlimited)
+  config.reconnect_delay     = 1                            # Base delay in seconds, doubles each attempt (default: 1)
+  config.reconnect_max_delay = 30                           # Cap on exponential backoff (default: 30)
+  config.notify_max_bytes    = 7999                         # PG NOTIFY payload limit (default: 7999)
 end
 ```
 

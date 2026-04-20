@@ -22,12 +22,13 @@ module Firehose
     NOTIFY_MAX_BYTES = 7999
 
     attr_accessor :notify_max_bytes, :reconnect_attempts, :reconnect_delay,
-                  :database_url, :cleanup_threshold
+                  :reconnect_max_delay, :database_url, :cleanup_threshold
 
     def initialize
       @notify_max_bytes = NOTIFY_MAX_BYTES
-      @reconnect_attempts = 5
+      @reconnect_attempts = nil  # nil = unlimited
       @reconnect_delay = 1
+      @reconnect_max_delay = 30
       @database_url = nil
       @cleanup_threshold = 100
       @registry = Registry.new
@@ -37,6 +38,22 @@ module Firehose
       @started = false
       @start_mutex = Mutex.new
       @reconnects = 0
+    end
+
+    # Snapshot of runtime state. Safe to call from any thread — useful
+    # from an admin endpoint or the firehose CLI to verify the consumer
+    # thread is alive and draining.
+    def diagnostics
+      {
+        pid: Process.pid,
+        running: @running,
+        started: @started,
+        thread_alive: @thread&.alive?,
+        thread_status: @thread&.status,
+        command_queue_depth: @commands.size,
+        reconnects: @reconnects,
+        subscribed_channels: @registry.size
+      }
     end
 
     def configure
@@ -154,11 +171,17 @@ module Firehose
     end
 
     def ensure_started!
-      return if @started
+      return if @started && @thread&.alive?
 
       @start_mutex.synchronize do
-        return if @started
+        return if @started && @thread&.alive?
+
+        if @started
+          Firehose.logger.warn { "[Firehose] Consumer thread died, respawning pid=#{Process.pid}" }
+        end
+
         @thread = Thread.new { run }
+        @thread.name = "firehose-server"
         @started = true
         Firehose.logger.info { "[Firehose] Server started pid=#{Process.pid}" }
       end
@@ -202,43 +225,61 @@ module Firehose
       end
     end
 
+    # Supervised main loop. Any exception restarts the loop with backoff
+    # rather than killing the thread. The only clean exit is :shutdown.
     def run
-      connect
-      @reconnects = 0
+      loop do
+        begin
+          connect_with_retry
+          serve
+          return  # clean shutdown
+        rescue PG::Error, IOError => e
+          Firehose.logger.warn { "[Firehose] Connection error: #{e.class}: #{e.message}. Reconnecting." }
+          # drop through — connect_with_retry will back off
+        rescue => e
+          # A bug in processing — don't let it kill the thread. Log and retry.
+          Firehose.logger.error {
+            "[Firehose] Unexpected error: #{e.class}: #{e.message}\n" +
+            (e.backtrace&.first(5)&.join("\n").to_s)
+          }
+          sleep 1  # prevent hot loop on a persistent bug
+        end
+      end
+    end
 
+    def serve
       loop do
         IO.select([@conn.socket_io, @wakeup_read])
         drain_wakeup
-        break unless process_commands
+        return unless process_commands
         receive_notifications
-        @reconnects = 0
       end
-    rescue PG::Error, IOError => e
-      attempt_reconnect(e) and retry
-    rescue => e
-      Firehose.logger.error { "[Firehose] Server error: #{e.message}\n#{e.backtrace&.first(5)&.join("\n")}" }
     end
 
-    def attempt_reconnect(error)
-      @reconnects += 1
+    # Connect to PG, retrying forever (or up to @reconnect_attempts) with
+    # capped exponential backoff. Re-issues LISTEN for every registered channel.
+    def connect_with_retry
+      loop do
+        begin
+          connect
+          @reconnects = 0
+          return
+        rescue PG::Error, IOError => e
+          @reconnects += 1
+          if @reconnect_attempts && @reconnects > @reconnect_attempts
+            Firehose.logger.error {
+              "[Firehose] Giving up after #{@reconnect_attempts} reconnect attempts: #{e.message}"
+            }
+            raise
+          end
 
-      if @reconnects > @reconnect_attempts
-        Firehose.logger.error {
-          "[Firehose] Reconnection failed after #{@reconnect_attempts} attempts: #{error.message}"
-        }
-        return false
+          delay = [@reconnect_delay * (2 ** (@reconnects - 1)), @reconnect_max_delay].min
+          Firehose.logger.warn {
+            "[Firehose] Connect failed (attempt #{@reconnects}): #{e.message}. Retrying in #{delay}s."
+          }
+          sleep delay
+        end
       end
-
-      delay = @reconnect_delay * (2 ** (@reconnects - 1))
-      Firehose.logger.warn {
-        "[Firehose] Connection lost: #{error.message}. " \
-        "Reconnecting in #{delay}s (#{@reconnects}/#{@reconnect_attempts})"
-      }
-      sleep delay
-      connect
-      true
-    rescue PG::Error => e
-      attempt_reconnect(e)
     end
 
     def drain_wakeup
@@ -325,6 +366,10 @@ module Firehose
       def each_channel(&)
         channels = @mutex.synchronize { @channels.keys }
         channels.each(&)
+      end
+
+      def size
+        @mutex.synchronize { @channels.size }
       end
     end
 
