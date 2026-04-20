@@ -120,9 +120,17 @@ module Firehose
       hash.each { |key, value| public_send(:"#{key}=", value) }
     end
 
+    # Start the consumer thread + watchdog + metrics emitter + notify pool
+    # eagerly. Safe to call repeatedly; ensure_started! is idempotent.
+    #
+    # Calling start() at boot makes health probes accurate immediately
+    # (thread_alive: true the moment the Rails engine initializer runs)
+    # instead of relying on the first broadcast/subscribe to trigger
+    # lazy-start. broadcast/subscribe/notify still call ensure_started!
+    # themselves so apps that never call start() explicitly keep working.
     def start
-      # Mark as ready but don't connect yet — connection is lazy.
       @running = true
+      ensure_started!
       self
     end
 
