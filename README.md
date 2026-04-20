@@ -239,19 +239,21 @@ Create `config/firehose.rb` for Ruby configuration, or `config/firehose.yml` for
 ```ruby
 # config/firehose.rb
 Firehose.server.configure do |config|
-  config.database_url           = ENV["FIREHOSE_DATABASE_URL"] # Direct PG connection (bypasses PgBouncer)
-  config.cleanup_threshold      = 100                          # Keep last N messages per stream (default: 100)
-  config.reconnect_attempts     = nil                          # Max reconnect attempts (default: nil = unlimited)
-  config.reconnect_delay        = 1                            # Base delay in seconds, doubles each attempt (default: 1)
-  config.reconnect_max_delay    = 30                           # Cap on exponential backoff (default: 30)
-  config.notify_max_bytes       = 7999                         # PG NOTIFY payload limit (default: 7999)
-  config.watchdog_enabled       = true                         # Detect wedged consumer thread (default: true)
-  config.watchdog_deadline      = 60                           # Seconds without heartbeat before forcing reconnect (default: 60)
-  config.watchdog_interval      = 10                           # Seconds between watchdog checks (default: 10)
-  config.tcp_keepalives_idle    = 30                           # Seconds idle before keepalive probes (default: 30)
-  config.tcp_keepalives_interval = 10                          # Seconds between keepalive probes (default: 10)
-  config.tcp_keepalives_count   = 3                            # Failed probes before peer declared dead (default: 3)
-  config.replay_on_reconnect    = true                         # Re-fetch missed messages after a reconnect (default: true)
+  config.database_url            = ENV["FIREHOSE_DATABASE_URL"] # Direct PG connection (bypasses PgBouncer)
+  config.cleanup_threshold       = 100                          # Keep last N messages per stream (default: 100)
+  config.reconnect_attempts      = nil                          # Max reconnect attempts (default: nil = unlimited)
+  config.reconnect_delay         = 1                            # Base delay in seconds, doubles each attempt (default: 1)
+  config.reconnect_max_delay     = 30                           # Cap on exponential backoff (default: 30)
+  config.notify_max_bytes        = 7999                         # PG NOTIFY payload limit (default: 7999)
+  config.watchdog_enabled        = true                         # Detect wedged consumer thread (default: true)
+  config.watchdog_deadline       = 60                           # Seconds without heartbeat before forcing reconnect (default: 60)
+  config.watchdog_interval       = 10                           # Seconds between watchdog checks (default: 10)
+  config.tcp_keepalives_idle     = 30                           # Seconds idle before keepalive probes (default: 30)
+  config.tcp_keepalives_interval = 10                           # Seconds between keepalive probes (default: 10)
+  config.tcp_keepalives_count    = 3                            # Failed probes before peer declared dead (default: 3)
+  config.replay_on_reconnect     = true                         # Re-fetch missed messages after a reconnect (default: true)
+  config.metrics_interval        = 15                           # Seconds between metric emissions (default: 15)
+  config.max_command_queue_depth = nil                          # Cap before NOTIFY commands are dropped (default: nil = unbounded)
 end
 ```
 
@@ -285,6 +287,77 @@ per outage (not once per failed retry) so you don't get paged for every
 backoff tick. Reports include `source: "firehose.server"` and a context
 hash with the current stage, reconnect count, subscriber count, and
 command queue depth.
+
+### Metrics
+
+Wire `Firehose.on_metrics` to any reporter:
+
+```ruby
+# config/initializers/firehose.rb
+Firehose.on_metrics = ->(metrics) {
+  metrics.each { |name, value| StatsD.gauge("firehose.#{name}", value) }
+}
+```
+
+The hook is called every `metrics_interval` seconds (default 15) with a
+flat hash containing:
+
+```
+command_queue_depth, subscribed_channels, seconds_since_heartbeat,
+thread_alive, watchdog_alive, reconnects_current,
+broadcasts_total, notifies_received, reconnects_total, watchdog_kicks,
+commands_dropped, replay_messages_delivered
+```
+
+Mix of gauges and monotonic counters — pick based on the metric name
+when you forward them. The emitter runs in its own thread, swallows any
+exception raised by your reporter, and starts only when `on_metrics` is
+set.
+
+### Replay gap
+
+When a client reconnects with `last_event_id` older than the oldest
+retained message on a stream, Firehose can't honor the replay. Instead
+of silently delivering a partial replay, the server emits a typed error
+event per stream:
+
+```json
+{ "error": "replay_gap", "stream": "foo",
+  "last_event_id": 123, "oldest_retained_id": 450, "current_id": 500 }
+```
+
+- WebSocket: delivered as a JSON text frame on the same connection.
+- SSE: delivered as `event: firehose_replay_gap` so clients can listen
+  targeted: `eventSource.addEventListener("firehose_replay_gap", handler)`.
+
+Clients decide how to recover: full page reload, API refetch, or a
+banner prompting the user. The gem's JS client dispatches a
+`firehose:replay_gap` CustomEvent that apps can observe.
+
+### WebSocket heartbeat
+
+When a stream is idle, the server sends a protocol-level ping frame
+every 30s. Browsers auto-respond with pong frames at the network layer
+per RFC 6455 — no client code needed. If no pong is received within 90s,
+the server closes the connection to reclaim resources held by half-open
+clients. The heartbeat piggybacks on the writer fiber to avoid
+concurrent-write races.
+
+SSE uses a comment-line keepalive (`: keepalive\n\n`) on the same 30s
+cadence — dead clients surface via the write failing.
+
+### Per-connection backpressure
+
+Each WebSocket handler bounds its outgoing event queue at 1000. A client
+whose consumption falls that far behind is disconnected (not silently
+buffered until OOM). On reconnect they may receive `replay_gap` if their
+cursor has aged past retention.
+
+The server's command queue (which fans out NOTIFYs to PG) can also be
+capped via `max_command_queue_depth`. When exceeded, new NOTIFY commands
+are dropped — messages remain persisted in `firehose_messages` so
+reconnecting clients catch up via replay. `listen`/`unlisten`/`shutdown`
+commands are never dropped.
 
 ### Diagnostics
 
