@@ -69,5 +69,52 @@ describe Firehose::Server do
       @reconnects = server.instance_variable_get(:@reconnects)
       expect(@reconnects).to be == 0
     end
+
+    it "increments replay_messages_delivered when replay fires" do
+      server.start
+      server.subscribe(server.channel_name(stream), ->(_) {})
+      sleep 0.2
+
+      before = server.metrics_snapshot[:replay_messages_delivered]
+
+      channel_record = Firehose::Models::Channel.find_or_create_by!(name: stream)
+      # Seed the cursor below the messages we're about to insert.
+      server.instance_variable_set(:@cursors,
+        { server.send(:pg_identifier, server.channel_name(stream)) => 0 })
+      3.times do |i|
+        channel_record.messages.create!(sequence: channel_record.sequence + i + 1, data: "replay-#{i}")
+      end
+
+      server.instance_variable_set(:@reconnects, 1)
+      server.send(:connect)
+
+      after = server.metrics_snapshot[:replay_messages_delivered]
+      expect(after - before).to be == 3
+    ensure
+      server&.shutdown
+    end
+
+    it "can be disabled via replay_on_reconnect = false" do
+      server.replay_on_reconnect = false
+      server.start
+      received = ::Queue.new
+      server.subscribe(server.channel_name(stream), ->(payload) { received << payload })
+      sleep 0.2
+
+      channel_record = Firehose::Models::Channel.find_or_create_by!(name: stream)
+      channel_record.messages.create!(sequence: 1, data: "never-replayed")
+
+      pg_id = server.send(:pg_identifier, server.channel_name(stream))
+      server.instance_variable_set(:@cursors, { pg_id => 0 })
+      server.instance_variable_set(:@reconnects, 1)
+      server.send(:connect)
+
+      # Nothing new should be delivered — replay_on_reconnect is off.
+      # Wait a short window to confirm silence.
+      sleep 0.3
+      expect(received.size).to be == 0
+    ensure
+      server&.shutdown
+    end
   end
 end
