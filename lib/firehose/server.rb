@@ -25,7 +25,7 @@ module Firehose
                   :reconnect_max_delay, :database_url, :cleanup_threshold,
                   :watchdog_enabled, :watchdog_deadline, :watchdog_interval,
                   :tcp_keepalives_idle, :tcp_keepalives_interval, :tcp_keepalives_count,
-                  :replay_on_reconnect
+                  :replay_on_reconnect, :metrics_interval, :max_command_queue_depth
 
     def initialize
       @notify_max_bytes = NOTIFY_MAX_BYTES
@@ -41,6 +41,8 @@ module Firehose
       @tcp_keepalives_interval = 10
       @tcp_keepalives_count = 3
       @replay_on_reconnect = true
+      @metrics_interval = 15         # seconds between metric emissions
+      @max_command_queue_depth = nil # nil = unbounded; numeric = drop :notify beyond cap
       @registry = Registry.new
       @commands = ::Queue.new
       @wakeup_read, @wakeup_write = IO.pipe
@@ -52,6 +54,15 @@ module Firehose
       @outage_reported = false
       @cursors = {}
       @cursors_mutex = Mutex.new
+      @counters = {
+        broadcasts_total: 0,
+        notifies_received: 0,
+        reconnects_total: 0,
+        watchdog_kicks: 0,
+        commands_dropped: 0,
+        replay_messages_delivered: 0
+      }
+      @counters_mutex = Mutex.new
     end
 
     # Snapshot of runtime state. Safe to call from any thread — useful
@@ -70,6 +81,27 @@ module Firehose
         reconnects: @reconnects,
         subscribed_channels: @registry.size
       }
+    end
+
+    # Flat hash of current metric values. Safe to call from any thread.
+    # Emitted periodically via Firehose.on_metrics when configured.
+    def metrics_snapshot
+      counters = @counters_mutex.synchronize { @counters.dup }
+      {
+        command_queue_depth: @commands.size,
+        subscribed_channels: @registry.size,
+        seconds_since_heartbeat: (monotonic_now - @heartbeat_at).round(3),
+        thread_alive: (@thread&.alive? ? 1 : 0),
+        watchdog_alive: (@watchdog&.alive? ? 1 : 0),
+        reconnects_current: @reconnects
+      }.merge(counters)
+    end
+
+    # Thread-safe counter increment. Called from producer threads,
+    # consumer thread, and watchdog — synchronized so values don't
+    # drift under concurrent updates.
+    def incr(key, by = 1)
+      @counters_mutex.synchronize { @counters[key] += by }
     end
 
     def configure
@@ -97,6 +129,7 @@ module Firehose
       return unless @started
       Firehose.logger.info { "[Firehose] Server shutting down" }
       @watchdog&.stop
+      @metrics_emitter&.stop
       enqueue([:shutdown])
       @thread&.join(5)
       @conn&.close
@@ -128,6 +161,7 @@ module Firehose
         CleanupJob.perform_later(stream)
       end
 
+      incr(:broadcasts_total)
       message
     end
 
@@ -177,7 +211,8 @@ module Firehose
     # socket makes any in-flight PG op raise, and the wakeup_write
     # forces IO.select to return. The supervisor catches the error
     # and connect_with_retry reopens the connection.
-    def force_reconnect!
+    def force_reconnect!(source: :external)
+      incr(:watchdog_kicks) if source == :watchdog
       conn = @conn
       begin
         conn&.close
@@ -242,12 +277,33 @@ module Firehose
           @watchdog = Watchdog.new(self).tap(&:start)
         end
 
+        if Firehose.on_metrics && !@metrics_emitter&.alive?
+          @metrics_emitter = MetricsEmitter.new(self).tap(&:start)
+        end
+
         Firehose.logger.info { "[Firehose] Server started pid=#{Process.pid}" }
       end
     end
 
     def enqueue(command)
       depth = @commands.size
+
+      # Backpressure: if a cap is configured and we're past it, drop new
+      # NOTIFYs. Messages are already persisted in firehose_messages; any
+      # reconnecting client will catch up via replay (or get replay_gap
+      # if their cursor is stale). We never drop :listen/:unlisten/:ping/
+      # :shutdown because those affect correctness, not just delivery.
+      if @max_command_queue_depth && depth >= @max_command_queue_depth && command.first == :notify
+        incr(:commands_dropped)
+        if (@counters[:commands_dropped] % 100).zero?
+          Firehose.logger.warn {
+            "[Firehose] Command queue at cap (#{depth}/#{@max_command_queue_depth}); " \
+            "dropping NOTIFY (total dropped: #{@counters[:commands_dropped]})"
+          }
+        end
+        return
+      end
+
       if depth > QUEUE_DEPTH_WARNING
         Firehose.logger.warn {
           "[Firehose] Command queue depth: #{depth}. " \
@@ -268,7 +324,10 @@ module Firehose
       @registry.each_channel { |ch| @conn.exec("LISTEN #{@conn.escape_identifier(ch)}") }
       Firehose.logger.debug { "[Firehose] Connected" }
 
-      replay_missed_messages if @replay_on_reconnect && @reconnects > 0
+      if @reconnects > 0
+        incr(:reconnects_total)
+        replay_missed_messages if @replay_on_reconnect
+      end
     end
 
     # After a reconnect, fan out any messages from the DB that postdate the
@@ -299,6 +358,7 @@ module Firehose
 
         if count > 0
           Firehose.logger.info { "[Firehose] Replayed #{count} missed message(s) on #{stream}" }
+          incr(:replay_messages_delivered, count)
         end
       end
     rescue => e
@@ -467,6 +527,7 @@ module Firehose
       @conn.consume_input
       while (notification = @conn.notifies)
         heartbeat!
+        incr(:notifies_received)
         channel = notification[:relname]
         payload = notification[:extra]
         Firehose.logger.debug { "[Firehose] received #{channel}" }
@@ -654,7 +715,7 @@ module Firehose
             "[Firehose] Watchdog: no consumer heartbeat in #{age.round(1)}s " \
             "(deadline #{@server.watchdog_deadline}s). Forcing reconnect."
           }
-          @server.force_reconnect!
+          @server.force_reconnect!(source: :watchdog)
           # Reset our own expectations so we don't immediately re-trigger
           # while the supervisor is reconnecting.
           sleep @server.watchdog_deadline
@@ -663,6 +724,66 @@ module Firehose
           # will update the heartbeat when it processes this command.
           @server.enqueue_ping
         end
+      end
+    end
+
+    # Periodic metrics emission. Independent of the watchdog so users can
+    # run one without the other. Same hardening pattern: own thread,
+    # catch-all rescue, never crashes the caller even if the user-supplied
+    # reporter raises.
+    class MetricsEmitter
+      def initialize(server)
+        @server = server
+        @thread = nil
+        @running = false
+      end
+
+      def start
+        return if @thread&.alive?
+        @running = true
+        @thread = Thread.new { run }
+        @thread.name = "firehose-metrics"
+        @thread.report_on_exception = false
+      end
+
+      def stop
+        @running = false
+        @thread&.join(2)
+        @thread = nil
+      end
+
+      def alive?
+        @thread&.alive? == true
+      end
+
+      private
+
+      def run
+        loop do
+          break unless @running
+          begin
+            sleep @server.metrics_interval
+            next unless @running
+            emit
+          rescue => e
+            begin
+              Firehose.logger.error { "[Firehose] MetricsEmitter error: #{e.class}: #{e.message}" }
+            rescue
+              # Even logging failed — swallow.
+            end
+            sleep 1
+          end
+        end
+      end
+
+      def emit
+        reporter = Firehose.on_metrics
+        return unless reporter
+        reporter.call(@server.metrics_snapshot)
+      rescue => e
+        # User-supplied reporter failed. Log and move on so the emitter
+        # thread keeps running.
+        Firehose.logger.warn { "[Firehose] on_metrics reporter raised: #{e.class}: #{e.message}" }
       end
     end
   end

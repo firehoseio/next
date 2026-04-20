@@ -39,6 +39,23 @@ module Firehose
     def logger=(logger)
       @logger = logger
     end
+
+    # Optional metrics hook. Called periodically from a supervised thread
+    # with a flat hash of current gauges and counters:
+    #
+    #   Firehose.on_metrics = ->(metrics) {
+    #     metrics.each { |k, v| StatsD.gauge("firehose.#{k}", v) }
+    #   }
+    #
+    # Set to nil (default) to disable emission. Gem never raises from a
+    # metrics call — if your reporter throws, the error is swallowed.
+    def on_metrics
+      @on_metrics
+    end
+
+    def on_metrics=(callable)
+      @on_metrics = callable
+    end
   end
 end
 
