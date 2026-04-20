@@ -272,9 +272,14 @@ module Firehose
     end
 
     def ensure_started!
+      # Once shutdown has started, do not spawn anything new. The wakeup
+      # pipe is closed and supporting threads are joining; a respawn here
+      # would produce a zombie thread that can't drain commands.
+      return unless @running
       return if @started && @thread&.alive?
 
       @start_mutex.synchronize do
+        return unless @running
         return if @started && @thread&.alive?
 
         if @started
@@ -332,6 +337,10 @@ module Firehose
       @wakeup_write.write_nonblock("x")
     rescue IO::WaitWritable
       # Pipe buffer full — thread will drain it
+    rescue IOError, Errno::EBADF
+      # Pipe closed (shutdown race). The consumer thread has already
+      # stopped; no one will read this command. Silent drop is correct —
+      # raising here would crash callers that arrived during shutdown.
     end
 
     def connect

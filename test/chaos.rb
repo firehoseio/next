@@ -187,4 +187,36 @@ describe "Firehose::Server chaos" do
       expect(notify_pool.running?).to be == false
     end
   end
+
+  with "post-shutdown producer calls" do
+    let(:server) { Firehose::Server.new }
+
+    it "does not respawn a zombie consumer thread" do
+      server.start
+      server.subscribe("chaos-post-#{SecureRandom.hex(4)}", ->(_) {})
+      sleep 0.1
+      server.shutdown
+
+      # A late producer call must not revive the thread. Previously
+      # ensure_started! would see @started=true & !alive? and try to
+      # respawn — but the wakeup pipe is already closed, producing a
+      # zombie that never drains.
+      server.subscribe("chaos-late-#{SecureRandom.hex(4)}", ->(_) {})
+
+      expect(server.instance_variable_get(:@thread)&.alive?).to be == false
+    end
+
+    it "doesn't raise when enqueue is called after shutdown" do
+      server.start
+      server.subscribe("chaos-enqueue-#{SecureRandom.hex(4)}", ->(_) {})
+      sleep 0.1
+      server.shutdown
+
+      # The wakeup pipe is closed; write_nonblock would raise IOError.
+      # enqueue must swallow that rather than crash the caller.
+      server.send(:enqueue, [:notify, "abc", "late"])
+      server.send(:enqueue, [:ping])
+      # no exception reaches here
+    end
+  end
 end
