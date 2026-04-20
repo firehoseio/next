@@ -239,12 +239,19 @@ Create `config/firehose.rb` for Ruby configuration, or `config/firehose.yml` for
 ```ruby
 # config/firehose.rb
 Firehose.server.configure do |config|
-  config.database_url        = ENV["FIREHOSE_DATABASE_URL"] # Direct PG connection (bypasses PgBouncer)
-  config.cleanup_threshold   = 100                          # Keep last N messages per stream (default: 100)
-  config.reconnect_attempts  = nil                          # Max reconnect attempts (default: nil = unlimited)
-  config.reconnect_delay     = 1                            # Base delay in seconds, doubles each attempt (default: 1)
-  config.reconnect_max_delay = 30                           # Cap on exponential backoff (default: 30)
-  config.notify_max_bytes    = 7999                         # PG NOTIFY payload limit (default: 7999)
+  config.database_url           = ENV["FIREHOSE_DATABASE_URL"] # Direct PG connection (bypasses PgBouncer)
+  config.cleanup_threshold      = 100                          # Keep last N messages per stream (default: 100)
+  config.reconnect_attempts     = nil                          # Max reconnect attempts (default: nil = unlimited)
+  config.reconnect_delay        = 1                            # Base delay in seconds, doubles each attempt (default: 1)
+  config.reconnect_max_delay    = 30                           # Cap on exponential backoff (default: 30)
+  config.notify_max_bytes       = 7999                         # PG NOTIFY payload limit (default: 7999)
+  config.watchdog_enabled       = true                         # Detect wedged consumer thread (default: true)
+  config.watchdog_deadline      = 60                           # Seconds without heartbeat before forcing reconnect (default: 60)
+  config.watchdog_interval      = 10                           # Seconds between watchdog checks (default: 10)
+  config.tcp_keepalives_idle    = 30                           # Seconds idle before keepalive probes (default: 30)
+  config.tcp_keepalives_interval = 10                          # Seconds between keepalive probes (default: 10)
+  config.tcp_keepalives_count   = 3                            # Failed probes before peer declared dead (default: 3)
+  config.replay_on_reconnect    = true                         # Re-fetch missed messages after a reconnect (default: true)
 end
 ```
 
@@ -268,6 +275,64 @@ Firehose.logger = Rails.logger            # default in Rails
 Firehose.logger = Logger.new($stdout)     # outside Rails
 Firehose.logger.level = Logger::DEBUG     # verbose: LISTEN/UNLISTEN/NOTIFY
 ```
+
+### Error reporting
+
+Firehose reports prolonged connection losses and unexpected errors through
+`Rails.error.report` (Rails 7+), which Sentry, Honeybadger, Appsignal,
+Rollbar, and similar services already hook into. Errors are reported once
+per outage (not once per failed retry) so you don't get paged for every
+backoff tick. Reports include `source: "firehose.server"` and a context
+hash with the current stage, reconnect count, subscriber count, and
+command queue depth.
+
+### Diagnostics
+
+```ruby
+Firehose.server.diagnostics
+# => {
+#   pid: 12345,
+#   running: true,
+#   started: true,
+#   thread_alive: true,
+#   thread_status: "sleep",
+#   watchdog_alive: true,
+#   seconds_since_heartbeat: 0.12,
+#   command_queue_depth: 0,
+#   reconnects: 0,
+#   subscribed_channels: 3
+# }
+```
+
+Use this from a Rails admin endpoint or console to verify the consumer
+thread is alive and draining. `seconds_since_heartbeat > 60` or
+`command_queue_depth` growing across samples is a sign the consumer is
+stuck — the watchdog will normally force a reconnect before that becomes
+serious.
+
+### Callback rule
+
+Subscriber callbacks run **synchronously on the single consumer thread**.
+A slow callback delays every other subscriber on every channel in that
+process. The built-in WebSocket, SSE, and Queue handlers all push to
+thread-safe queues in microseconds — safe. If you use
+`Firehose.channel("x").subscribe { ... }` with custom code, keep the
+block tight (push onto your own queue, enqueue a job, signal a fiber)
+and do the heavy work elsewhere.
+
+### Broadcast connection pool
+
+`broadcast` writes through ActiveRecord, so it uses the app's AR pool.
+Under heavy broadcast volume, that contends with request handling. Two
+mitigations:
+
+- Set `config.database_url` to a direct PG URL — this only affects the
+  dedicated LISTEN connection, not broadcast writes.
+- Run Firehose writes against a separate AR role with its own pool using
+  `ActiveRecord::Base.connects_to(database: { writing: :primary, firehose: :firehose })`
+  and call `Firehose::Models::Channel.connected_to(role: :firehose)` in an
+  initializer. Out of scope for the gem itself, but worth setting up on
+  busy deployments.
 
 ## Protocol
 
