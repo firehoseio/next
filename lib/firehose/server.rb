@@ -25,7 +25,8 @@ module Firehose
                   :reconnect_max_delay, :database_url, :cleanup_threshold,
                   :watchdog_enabled, :watchdog_deadline, :watchdog_interval,
                   :tcp_keepalives_idle, :tcp_keepalives_interval, :tcp_keepalives_count,
-                  :replay_on_reconnect, :metrics_interval, :max_command_queue_depth
+                  :replay_on_reconnect, :metrics_interval, :max_command_queue_depth,
+                  :notify_pool_size
 
     def initialize
       @notify_max_bytes = NOTIFY_MAX_BYTES
@@ -43,6 +44,7 @@ module Firehose
       @replay_on_reconnect = true
       @metrics_interval = 15         # seconds between metric emissions
       @max_command_queue_depth = nil # nil = unbounded; numeric = drop :notify beyond cap
+      @notify_pool_size = 4          # NOTIFY worker threads; 0 = run NOTIFYs inline on consumer thread
       @registry = Registry.new
       @commands = ::Queue.new
       @wakeup_read, @wakeup_write = IO.pipe
@@ -57,6 +59,7 @@ module Firehose
       @counters = {
         broadcasts_total: 0,
         notifies_received: 0,
+        notify_failures: 0,
         reconnects_total: 0,
         watchdog_kicks: 0,
         commands_dropped: 0,
@@ -130,6 +133,7 @@ module Firehose
       Firehose.logger.info { "[Firehose] Server shutting down" }
       @watchdog&.stop
       @metrics_emitter&.stop
+      @notify_pool&.stop
       enqueue([:shutdown])
       @thread&.join(5)
       @conn&.close
@@ -279,6 +283,10 @@ module Firehose
 
         if Firehose.on_metrics && !@metrics_emitter&.alive?
           @metrics_emitter = MetricsEmitter.new(self).tap(&:start)
+        end
+
+        if @notify_pool_size && @notify_pool_size > 0 && !@notify_pool&.running?
+          @notify_pool = NotifyPool.new(self, size: @notify_pool_size).tap(&:start)
         end
 
         Firehose.logger.info { "[Firehose] Server started pid=#{Process.pid}" }
@@ -506,7 +514,7 @@ module Firehose
           @conn.exec("UNLISTEN #{@conn.escape_identifier(channel)}")
         in [:notify, channel, payload]
           assert_pg_identifier!(channel)
-          pg_notify(channel, payload)
+          dispatch_notify(channel, payload)
         in [:ping]
           # watchdog liveness probe — just touching the heartbeat above is enough.
           nil
@@ -517,6 +525,18 @@ module Firehose
     rescue ThreadError
       # Queue empty — done processing
       true
+    end
+
+    # Route NOTIFYs through the worker pool when configured, otherwise
+    # execute inline on the listener connection (backward-compatible).
+    # The pool keeps NOTIFYs off the single LISTEN connection so
+    # receive_notifications can interleave with dispatch.
+    def dispatch_notify(channel, payload)
+      if @notify_pool&.running?
+        @notify_pool.enqueue(channel, payload)
+      else
+        @conn.exec_params("SELECT pg_notify($1, $2)", [channel, payload])
+      end
     end
 
     def pg_notify(channel, payload)
@@ -784,6 +804,105 @@ module Firehose
         # User-supplied reporter failed. Log and move on so the emitter
         # thread keeps running.
         Firehose.logger.warn { "[Firehose] on_metrics reporter raised: #{e.class}: #{e.message}" }
+      end
+    end
+
+    # Pool of worker threads that dispatch NOTIFY commands off the
+    # listener connection. Lets the consumer thread interleave
+    # receive_notifications with dispatch instead of blocking behind
+    # a backlog of NOTIFYs.
+    #
+    # Design: each worker owns its own PG connection, pops from a
+    # shared Thread::Queue, and executes pg_notify. Failures are
+    # isolated per worker — one bad connection doesn't take the pool
+    # down. Failed NOTIFYs are counted (:notify_failures) and dropped;
+    # the underlying message is already persisted in firehose_messages
+    # so reconnecting clients catch up via replay.
+    #
+    # NOTIFY ordering across the pool is not preserved. Consumers
+    # that care about order rely on the message's id/sequence rather
+    # than delivery order — the same way they handle multi-writer
+    # broadcasts today.
+    class NotifyPool
+      def initialize(server, size:)
+        @server = server
+        @size = size
+        @queue = ::Queue.new
+        @threads = []
+        @running = false
+      end
+
+      def running?
+        @running && @threads.any?(&:alive?)
+      end
+
+      def start
+        return if @running
+        @running = true
+        @size.times do |i|
+          @threads << spawn_worker(i)
+        end
+      end
+
+      def stop
+        return unless @running
+        @running = false
+        @size.times { @queue.push(:shutdown) }
+        @threads.each { |t| t.join(2) }
+        @threads.clear
+      end
+
+      def enqueue(channel, payload)
+        @queue.push([channel, payload])
+      end
+
+      def depth
+        @queue.size
+      end
+
+      private
+
+      # Each worker runs in its own supervised loop: fetch a command,
+      # try to execute on its PG conn, replace the conn on error.
+      # Never raises out — catch-all rescue keeps the thread alive.
+      def spawn_worker(index)
+        Thread.new do
+          Thread.current.name = "firehose-notify-#{index}"
+          Thread.current.report_on_exception = false
+          conn = nil
+          loop do
+            cmd = @queue.pop
+            break if cmd == :shutdown
+
+            channel, payload = cmd
+            begin
+              conn ||= @server.send(:open_connection)
+              conn.exec_params("SELECT pg_notify($1, $2)", [channel, payload])
+            rescue PG::Error => e
+              Firehose.logger.warn {
+                "[Firehose] NotifyPool worker #{index}: #{e.class}: #{e.message}; reopening"
+              }
+              begin
+                conn&.close
+              rescue
+                # Already dead
+              end
+              conn = nil
+              @server.incr(:notify_failures)
+            rescue => e
+              Firehose.logger.error {
+                "[Firehose] NotifyPool worker #{index} unexpected: #{e.class}: #{e.message}"
+              }
+              @server.incr(:notify_failures)
+            end
+          end
+        ensure
+          begin
+            conn&.close
+          rescue
+            # Shutting down — any close error is ignorable
+          end
+        end
       end
     end
   end

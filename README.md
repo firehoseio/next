@@ -254,6 +254,7 @@ Firehose.server.configure do |config|
   config.replay_on_reconnect     = true                         # Re-fetch missed messages after a reconnect (default: true)
   config.metrics_interval        = 15                           # Seconds between metric emissions (default: 15)
   config.max_command_queue_depth = nil                          # Cap before NOTIFY commands are dropped (default: nil = unbounded)
+  config.notify_pool_size        = 4                            # NOTIFY worker threads; 0 = run inline (default: 4)
 end
 ```
 
@@ -345,6 +346,27 @@ concurrent-write races.
 
 SSE uses a comment-line keepalive (`: keepalive\n\n`) on the same 30s
 cadence — dead clients surface via the write failing.
+
+### NOTIFY worker pool
+
+By default Firehose runs `SELECT pg_notify(...)` calls on a pool of 4
+worker threads, each with its own PG connection. This decouples NOTIFY
+dispatch from the listener connection so `receive_notifications` can
+interleave with dispatch instead of blocking behind a backlog of
+pending NOTIFYs.
+
+Set `notify_pool_size = 0` to disable the pool and run NOTIFYs inline
+on the listener connection (original behavior).
+
+Ordering across the pool is not preserved — clients that care about
+event order rely on each message's `id` and `sequence` fields the same
+way they already do for multi-writer broadcasts. The `firehose.js`
+client tracks `lastEventId` monotonically, so out-of-order delivery is
+handled naturally.
+
+Failed NOTIFYs are counted as `notify_failures` in metrics. The
+underlying message stays persisted in `firehose_messages`, so
+reconnecting clients catch up via replay.
 
 ### Per-connection backpressure
 
