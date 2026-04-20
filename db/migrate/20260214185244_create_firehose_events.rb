@@ -1,4 +1,4 @@
-class CreateFirehoseEvents < ActiveRecord::Migration[8.2]
+class CreateFirehoseEvents < ActiveRecord::Migration[8.1]
   def change
     create_table :firehose_channels do |t|
       t.text :name, null: false
