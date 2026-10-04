@@ -109,6 +109,37 @@ describe Firehose::Server::NotifyPool do
       server&.shutdown
     end
 
+    it "delivers a NOTIFY sent on a connection Postgres has closed" do
+      # Idle worker connections get dropped by the server (idle timeouts,
+      # failovers, proxies). The worker only finds out when it sends, so
+      # that send must be retried on a fresh connection, not dropped.
+      # Queue messages are never persisted, so a dropped one is gone.
+      server.notify_pool_size = 1
+      server.start
+
+      channel = "stale-conn-#{SecureRandom.hex(4)}"
+      queue = Firehose::Queue.new(channel, server:)
+      queue.subscribe
+      sleep 0.2
+
+      # Open the worker's connection with a first message.
+      queue.push("first")
+      expect(queue.pop(timeout: 3)).to be == "first"
+
+      # Close it from the server side, behind the worker's back.
+      ActiveRecord::Base.connection.execute(<<~SQL)
+        SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+        WHERE query LIKE 'SELECT pg_notify%' AND pid <> pg_backend_pid()
+      SQL
+      sleep 0.2
+
+      queue.push("after-drop")
+      expect(queue.pop(timeout: 3)).to be == "after-drop"
+    ensure
+      queue&.close
+      server&.shutdown
+    end
+
     it "keeps other workers available when one worker's connection fails" do
       # Each worker owns its own conn. A failure on one must not affect the
       # others. This is an observational test: after forcing a failure on

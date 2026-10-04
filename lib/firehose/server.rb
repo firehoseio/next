@@ -832,9 +832,11 @@ module Firehose
     # Design: each worker owns its own PG connection, pops from a
     # shared Thread::Queue, and executes pg_notify. Failures are
     # isolated per worker — one bad connection doesn't take the pool
-    # down. Failed NOTIFYs are counted (:notify_failures) and dropped;
-    # the underlying message is already persisted in firehose_messages
-    # so reconnecting clients catch up via replay.
+    # down. A NOTIFY that hits a dead connection is retried once on a
+    # fresh one. Other failures are counted (:notify_failures) and
+    # dropped; broadcast messages are already persisted in
+    # firehose_messages so reconnecting clients catch up via replay.
+    # Queue messages are not persisted, which is why the retry matters.
     #
     # NOTIFY ordering across the pool is not preserved. Consumers
     # that care about order rely on the message's id/sequence rather
@@ -892,7 +894,9 @@ module Firehose
             break if cmd == :shutdown
 
             channel, payload = cmd
+            attempts = 0
             begin
+              attempts += 1
               conn ||= @server.send(:open_connection)
               conn.exec_params("SELECT pg_notify($1, $2)", [channel, payload])
             rescue PG::Error => e
@@ -905,6 +909,11 @@ module Firehose
                 # Already dead
               end
               conn = nil
+              # A dead connection says nothing about the NOTIFY itself, so
+              # send it once more on a fresh one. Idle connections get
+              # closed server-side and the worker only learns on its next
+              # send; without the retry that message is lost.
+              retry if attempts < 2 && e.is_a?(PG::ConnectionBad)
               @server.incr(:notify_failures)
             rescue => e
               Firehose.logger.error {
