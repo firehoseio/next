@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.1.0] - 2026-10-18
+
+### Fixed
+
+- A NOTIFY sent on a pool connection the database had already closed is retried once on a fresh connection instead of dropped. Idle connections get closed server-side, and since `Firehose::Queue` messages aren't persisted, a dropped one was gone for good.
+
 ## [2.0.0] - 2026
 
 Complete rewrite with new architecture.

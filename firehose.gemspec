@@ -1,12 +1,12 @@
 Gem::Specification.new do |spec|
   spec.name = "firehose"
-  spec.version = "2.0.0"
+  spec.version = "2.1.0"
   spec.authors = ["Brad Gessler"]
   spec.email = ["brad@bradgessler.com"]
 
   spec.summary = "WebSocket and SSE streaming with database-backed replay"
   spec.description = "Real-time streaming for Rails with PostgreSQL persistence and replay support. Supports both WebSocket and Server-Sent Events transports with automatic reconnection and event replay."
-  spec.homepage = "https://github.com/opengraphplus/firehose"
+  spec.homepage = "https://github.com/firehoseio/next"
   spec.license = "MIT"
   spec.required_ruby_version = ">= 3.2.0"
 
